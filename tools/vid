@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# vid — ffmpeg helper for extracting frames/clips from video for analysis
+# Usage: vid <command> [options] <file>
+set -euo pipefail
+
+PROG="${0##*/}"
+
+usage() {
+  cat >&2 <<EOF
+Usage: $PROG <command> [options] <file>
+
+Commands:
+  probe   <file>                    Print video metadata as JSON
+  frames  <file> [options]          Extract frames as PNG
+  grid    <file> [options]          Extract contact-sheet grid image
+  clip    <file> [options]          Extract a short video clip
+
+frames options:
+  --at T1[,T2,...]   Extract frames at specific timestamps (seconds, e.g. 0,5,10.5)
+  --every N           Extract one frame every N seconds across full duration
+  --count N           Extract N evenly-spaced frames (default: 12)
+  --out DIR           Output directory (default: <file_stem>_frames/)
+  --width W           Scale frames to this width (default: 1280, 0=native)
+
+grid options:
+  --count N           Number of thumbnails in the grid (default: 24)
+  --cols N            Columns in the grid (default: 6)
+  --width W           Width of each thumbnail (default: 320)
+  --out FILE          Output file (default: <file_stem>_grid.jpg)
+
+clip options:
+  --start T           Start time in seconds (default: 0)
+  --duration D        Duration in seconds (default: 10)
+  --out FILE          Output file (default: <file_stem>_clip_<start>.mp4)
+
+EOF
+  exit 2
+}
+
+require_file() {
+  local f="$1"
+  if [[ -z "$f" || ! -f "$f" ]]; then
+    echo "$PROG: file not found: $f" >&2
+    exit 1
+  fi
+}
+
+cmd_probe() {
+  local file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -*) echo "$PROG probe: unknown option: $1" >&2; exit 1 ;;
+      *)  file="$1"; shift ;;
+    esac
+  done
+  require_file "$file"
+  ffprobe -v quiet -print_format json -show_streams -show_format "$file"
+}
+
+cmd_frames() {
+  local file="" at="" every="" count=12 out="" width=1280
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --at)       at="$2";    shift 2 ;;
+      --every)    every="$2"; shift 2 ;;
+      --count)    count="$2"; shift 2 ;;
+      --out)      out="$2";   shift 2 ;;
+      --width)    width="$2"; shift 2 ;;
+      -*)         echo "$PROG frames: unknown option: $1" >&2; exit 1 ;;
+      *)          file="$1";  shift ;;
+    esac
+  done
+  require_file "$file"
+
+  local stem="${file%.*}"
+  stem="${stem##*/}"
+  out="${out:-${file%/*}/${stem}_frames}"
+  mkdir -p "$out"
+
+  local duration
+  duration=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$file")
+  duration=${duration%.*}
+
+  local scale_filter=""
+  if [[ "$width" -gt 0 ]]; then
+    scale_filter=",scale=${width}:-2"
+  fi
+
+  if [[ -n "$at" ]]; then
+    IFS=',' read -ra timestamps <<< "$at"
+    for ts in "${timestamps[@]}"; do
+      local outfile="${out}/frame_$(printf '%07.3f' "$ts" | tr '.' '_').png"
+      ffmpeg -ss "$ts" -i "$file" -vframes 1 \
+        -vf "thumbnail${scale_filter}" \
+        -y -loglevel error "$outfile"
+      echo "$outfile"
+    done
+  elif [[ -n "$every" ]]; then
+    ffmpeg -i "$file" \
+      -vf "fps=1/${every}${scale_filter}" \
+      -y -loglevel error \
+      "${out}/frame_%07d.png"
+    ls "${out}"/frame_*.png 2>/dev/null
+  else
+    # evenly-spaced count frames
+    local step
+    step=$(echo "scale=3; $duration / ($count + 1)" | bc)
+    for i in $(seq 1 "$count"); do
+      local ts
+      ts=$(echo "scale=3; $i * $step" | bc)
+      local outfile="${out}/frame_$(printf '%07.3f' "$ts" | tr '.' '_').png"
+      ffmpeg -ss "$ts" -i "$file" -vframes 1 \
+        -vf "thumbnail${scale_filter}" \
+        -y -loglevel error "$outfile"
+      echo "$outfile"
+    done
+  fi
+}
+
+cmd_grid() {
+  local file="" count=24 cols=6 width=320 out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --count) count="$2"; shift 2 ;;
+      --cols)  cols="$2";  shift 2 ;;
+      --width) width="$2"; shift 2 ;;
+      --out)   out="$2";   shift 2 ;;
+      -*)      echo "$PROG grid: unknown option: $1" >&2; exit 1 ;;
+      *)       file="$1";  shift ;;
+    esac
+  done
+  require_file "$file"
+
+  local stem="${file%.*}"
+  stem="${stem##*/}"
+  local dir="${file%/*}"
+  out="${out:-${dir}/${stem}_grid.jpg}"
+
+  local duration
+  duration=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$file")
+
+  # Build tile filter: extract count evenly-spaced frames then tile
+  local fps_num
+  fps_num=$(echo "scale=6; $count / $duration" | bc)
+
+  ffmpeg -i "$file" \
+    -vf "fps=${fps_num},scale=${width}:-2,tile=${cols}x$(( (count + cols - 1) / cols ))" \
+    -vframes 1 \
+    -y -loglevel error "$out"
+
+  echo "$out"
+}
+
+cmd_clip() {
+  local file="" start=0 duration=10 out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --start)    start="$2";    shift 2 ;;
+      --duration) duration="$2"; shift 2 ;;
+      --out)      out="$2";      shift 2 ;;
+      -*)         echo "$PROG clip: unknown option: $1" >&2; exit 1 ;;
+      *)          file="$1";     shift ;;
+    esac
+  done
+  require_file "$file"
+
+  local stem="${file%.*}"
+  stem="${stem##*/}"
+  local dir="${file%/*}"
+  out="${out:-${dir}/${stem}_clip_${start}.mp4}"
+
+  ffmpeg -ss "$start" -i "$file" -t "$duration" \
+    -c:v libx264 -crf 23 -preset fast \
+    -y -loglevel error "$out"
+
+  echo "$out"
+}
+
+[[ $# -eq 0 ]] && usage
+
+cmd="$1"; shift
+case "$cmd" in
+  probe)  cmd_probe  "$@" ;;
+  frames) cmd_frames "$@" ;;
+  grid)   cmd_grid   "$@" ;;
+  clip)   cmd_clip   "$@" ;;
+  -h|--help|help) usage ;;
+  *) echo "$PROG: unknown command: $cmd" >&2; usage ;;
+esac
