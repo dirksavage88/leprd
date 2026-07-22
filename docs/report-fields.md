@@ -4,6 +4,14 @@
 
 The report relies on `estimator_status_flags` for fusion state. In replay logs, `estimator_aid_src_*` topics are not always present even when the corresponding fusion path is active.
 
+For scalar height innovations, the report prefers direct aid-source topics when logged:
+
+- `estimator_aid_src_baro_hgt.innovation`
+- `estimator_aid_src_rng_hgt.innovation`
+- `estimator_aid_src_gnss_hgt.innovation`
+
+When those topics are missing, it falls back to the aggregate `estimator_innovations.*_vpos`, `estimator_innovation_variances.*_vpos`, and `estimator_innovation_test_ratios.*_vpos` fields. PX4 publishes the aggregate baro height fields from the same internal `aid_src_baro_hgt` state.
+
 Important flags:
 
 - `cs_gps`: GNSS horizontal aiding active

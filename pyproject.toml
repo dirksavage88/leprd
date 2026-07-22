@@ -12,6 +12,8 @@ dependencies = [
   "matplotlib>=3.7",
   "numpy>=1.24",
   "pyulog>=1.0",
+  "pyyaml>=6.0.3",
+  "scipy>=1.17.1",
 ]
 
 [project.scripts]
@@ -22,3 +24,8 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

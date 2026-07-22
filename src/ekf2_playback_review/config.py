@@ -15,12 +15,12 @@ class LogSpec:
 @dataclass(frozen=True)
 class ReviewConfig:
     title: str
-    root: Path
     output_dir: Path
-    original_key: str
-    latest_key: str
-    compile_pdf: bool
-    logs: tuple[LogSpec, ...]
+    log: LogSpec
+    divergence_threshold_m: float = 0.5
+    throttle_threshold: float = 0.3
+    hover_max_speed_ms: float = 1.5
+    shade_flight_modes: bool = True
 
 
 def _resolve(base: Path, value: str | Path) -> Path:
@@ -30,42 +30,60 @@ def _resolve(base: Path, value: str | Path) -> Path:
     return (base / path).resolve()
 
 
+def config_from_log(
+    log_path: str | Path,
+    output_dir: str | Path | None = None,
+    title: str | None = None,
+) -> ReviewConfig:
+    resolved_log = Path(log_path).expanduser().resolve()
+    resolved_output = (
+        Path(output_dir).expanduser().resolve()
+        if output_dir is not None
+        else (Path.cwd() / "reports" / f"{resolved_log.stem}-review").resolve()
+    )
+
+    return ReviewConfig(
+        title=title or f"PX4 EKF2 Review: {resolved_log.stem}",
+        output_dir=resolved_output,
+        log=LogSpec(
+            key="flight",
+            title=resolved_log.name,
+            path=resolved_log,
+        ),
+        shade_flight_modes=True,
+    )
+
+
 def load_config(path: str | Path) -> ReviewConfig:
     config_path = Path(path).expanduser().resolve()
     with config_path.open("rb") as fh:
         data = tomllib.load(fh)
 
     config_dir = config_path.parent
-    root = _resolve(config_dir, data.get("root", "."))
+
+    raw_log = data.get("log")
+    if not raw_log:
+        raise ValueError("config must contain a [log] table")
+
+    try:
+        log_path = _resolve(config_dir, raw_log["path"])
+    except KeyError as exc:
+        raise ValueError(f"missing required log field: {exc.args[0]}") from exc
+
+    log = LogSpec(
+        key=str(raw_log.get("key", "log")),
+        title=str(raw_log.get("title", log_path.name)),
+        path=log_path,
+    )
+
     output_dir = _resolve(config_dir, data.get("output_dir", "reports/review"))
 
-    logs = []
-    for raw in data.get("logs", []):
-        try:
-            key = str(raw["key"])
-            title = str(raw.get("title", key))
-            rel_path = raw["path"]
-        except KeyError as exc:
-            raise ValueError(f"missing required log field: {exc.args[0]}") from exc
-        logs.append(LogSpec(key=key, title=title, path=_resolve(root, rel_path)))
-
-    if not logs:
-        raise ValueError("config must contain at least one [[logs]] entry")
-
-    original_key = str(data.get("original_key", logs[0].key))
-    latest_key = str(data.get("latest_key", logs[-1].key))
-    keys = {log.key for log in logs}
-    if original_key not in keys:
-        raise ValueError(f"original_key {original_key!r} is not in logs")
-    if latest_key not in keys:
-        raise ValueError(f"latest_key {latest_key!r} is not in logs")
-
     return ReviewConfig(
-        title=str(data.get("title", "PX4 EKF2 Playback Review")),
-        root=root,
+        title=str(data.get("title", "PX4 EKF2 Review")),
         output_dir=output_dir,
-        original_key=original_key,
-        latest_key=latest_key,
-        compile_pdf=bool(data.get("compile_pdf", False)),
-        logs=tuple(logs),
+        log=log,
+        divergence_threshold_m=float(data.get("divergence_threshold_m", 0.5)),
+        throttle_threshold=float(data.get("throttle_threshold", 0.3)),
+        hover_max_speed_ms=float(data.get("hover_max_speed_ms", 1.5)),
+        shade_flight_modes=bool(data.get("shade_flight_modes", True)),
     )

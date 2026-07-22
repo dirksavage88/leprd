@@ -8,9 +8,14 @@ __pycache__/
 htmlcov/
 .venv/
 venv/
+*.egg-info/
+build/
+dist/
 
 # Generated review artifacts
+review.toml
 reports/
+tmp/
 *.aux
 *.fdb_latexmk
 *.fls
@@ -18,6 +23,14 @@ reports/
 *.out
 *.synctex.gz
 
+# Local flight logs
+logs/
+*.ulg
+
+# Local browser/test tooling
+node_modules/
+
 # Local editor state
 .vscode/
 .idea/
+.DS_Store
