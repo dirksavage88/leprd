@@ -4,12 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 import tomllib
 
+from .logsource import ARDUPILOT, AUTO, resolve_log_type
+
 
 @dataclass(frozen=True)
 class LogSpec:
     key: str
     title: str
     path: Path
+    #: ``auto`` (infer from the file extension), ``ulog``, or ``ardupilot``.
+    log_type: str = AUTO
 
 
 @dataclass(frozen=True)
@@ -30,10 +34,24 @@ def _resolve(base: Path, value: str | Path) -> Path:
     return (base / path).resolve()
 
 
+def _review_label(log_path: Path, log_type: str) -> str:
+    """Name the analysis the log will get, for default report titles.
+
+    An unresolvable ``log_type`` is not an error here; `open_log` reports it with a
+    better message when the review actually runs.
+    """
+    try:
+        resolved = resolve_log_type(log_path, log_type)
+    except ValueError:
+        resolved = ""
+    return "ArduPilot Rover Review" if resolved == ARDUPILOT else "PX4 EKF2 Review"
+
+
 def config_from_log(
     log_path: str | Path,
     output_dir: str | Path | None = None,
     title: str | None = None,
+    log_type: str = AUTO,
 ) -> ReviewConfig:
     resolved_log = Path(log_path).expanduser().resolve()
     resolved_output = (
@@ -43,12 +61,13 @@ def config_from_log(
     )
 
     return ReviewConfig(
-        title=title or f"PX4 EKF2 Review: {resolved_log.stem}",
+        title=title or f"{_review_label(resolved_log, log_type)}: {resolved_log.stem}",
         output_dir=resolved_output,
         log=LogSpec(
             key="flight",
             title=resolved_log.name,
             path=resolved_log,
+            log_type=log_type,
         ),
         shade_flight_modes=True,
     )
@@ -74,12 +93,14 @@ def load_config(path: str | Path) -> ReviewConfig:
         key=str(raw_log.get("key", "log")),
         title=str(raw_log.get("title", log_path.name)),
         path=log_path,
+        # Per-log log_type wins; the top-level key sets the default.
+        log_type=str(raw_log.get("log_type", data.get("log_type", AUTO))),
     )
 
     output_dir = _resolve(config_dir, data.get("output_dir", "reports/review"))
 
     return ReviewConfig(
-        title=str(data.get("title", "PX4 EKF2 Review")),
+        title=str(data.get("title", _review_label(log.path, log.log_type))),
         output_dir=output_dir,
         log=log,
         divergence_threshold_m=float(data.get("divergence_threshold_m", 0.5)),

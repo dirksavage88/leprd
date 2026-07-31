@@ -1,8 +1,15 @@
 # EKF2 Playback Review
 
-A small report generator for PX4 EKF2 replay logs. It reads a `.ulg` file, generates comparison plots, writes a text summary, and compiles a LaTeX PDF.
+A small report generator for flight-controller logs. It reads one log, generates plots, writes a text summary, and compiles a LaTeX PDF. Two formats are supported:
+
+- **PX4 EKF2** — `.ulg` (ULog) files.
+- **ArduPilot Rover** — `.BIN`/`.log` dataflash logs.
+
+The log's format selects the analysis; the same `generate` command handles both.
 
 ## What It Produces
+
+For **PX4** logs:
 
 - Raw GPS altitude and EKF local/global position plots
 - GPS quality, DOP, accuracy, jamming/spoofing, and EKF GPS check plots
@@ -10,9 +17,17 @@ A small report generator for PX4 EKF2 replay logs. It reads a `.ulg` file, gener
 - Innovation test ratios
 - Height setpoint-versus-estimate deltas and flight-mode background shading
 - Vertical and horizontal residuals against approximate gate thresholds
-- Replay comparison plots and a summary table
-- `summary.txt` with key metrics for each replay
 - `ekf2_review.pdf`
+
+For **ArduPilot Rover** logs:
+
+- Steering-rate controller gains (`ATC_STR_RAT_FF`/`_P`/`_I`/`_D`/`_IMAX`)
+- Desired-vs-achieved turn rate with overshoot intervals shaded, plus metrics (RMS error, peak overshoot %, time overshooting)
+- Steering-rate PID target/actual and P/I/D/FF term contributions
+- EKF3 innovations (`XKF3`) and normalized test ratios (`XKF4`) with a navigation-health verdict
+- `rover_review.pdf`
+
+Both write a `summary.txt` of key metrics.
 
 ## Quick Start
 
@@ -21,6 +36,7 @@ From this repo directory:
 ```bash
 uv sync
 uv run ekf2-review generate /path/to/flight.ulg
+uv run ekf2-review generate /path/to/rover.BIN
 ```
 
 Or with a plain venv:
@@ -90,11 +106,28 @@ title = "Flight log"
 path = "/absolute/path/to/flight.ulg"
 ```
 
-Relative log paths and `output_dir` are resolved relative to the config file. Use an absolute `path` when the `.ulg` lives outside this repo.
+Relative log paths and `output_dir` are resolved relative to the config file. Use an absolute `path` when the log lives outside this repo.
+
+### Log Type
+
+`log_type` selects the analysis: `auto` (the default), `ulog`, or `ardupilot`. With `auto`, `.ulg` is treated as PX4 and `.BIN`/`.log` as ArduPilot. Set it top-level, inside `[log]`, or with `--log-type` on the command line — useful for a dataflash log saved under an unrecognised extension.
+
+```toml
+title = "Boat5 Rover Steering Review"
+output_dir = "reports/boat5-review"
+log_type = "ardupilot"
+
+[log]
+key = "boat5"
+title = "boat5_ark_06_18_2026"
+path = "boat5_ark_06_18_2026.BIN"
+```
 
 ## Notes
 
 - `estimator_aid_src_*` topics are preferred for scalar height innovations when present. The aggregate `estimator_innovations`, `estimator_innovation_variances`, and `estimator_innovation_test_ratios` topics are used as fallbacks for older/replay logs.
 - `estimator_aid_src_gnss_vel` is often not logged in replay output. The tool uses `estimator_status_flags.cs_gnss_vel` as the fusion-active signal.
-- Innovation test ratio `1.0` means outside the configured EKF gate, not one sigma.
+- Innovation test ratio `1.0` means outside the configured EKF gate, not one sigma (PX4 and ArduPilot EKF3 alike).
+- ArduPilot Rover steering-rate gains are `ATC_STR_RAT_*`; there is no bare `ATC_STR_P`/`ATC_STR_I` in stock firmware.
+- `pyulog` and `pymavlink` are imported lazily, so only the backend for the format you use has to work.
 - The tool intentionally keeps generated reports out of git via `.gitignore`.

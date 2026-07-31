@@ -7,15 +7,27 @@ import sys
 
 from .analysis import generate_review
 from .config import config_from_log, load_config
+from .logsource import ARDUPILOT, AUTO, ULOG
 from .precision_landing import generate_pl_report
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ekf2-review", description="Generate PX4 EKF2 replay review PDFs")
+    parser = argparse.ArgumentParser(
+        prog="ekf2-review",
+        description="Generate PX4 EKF2 / ArduPilot Rover log review PDFs",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate", help="generate plots, summary, and PDF")
-    gen.add_argument("log", nargs="?", type=Path, help="path to .ulg flight log")
+    gen.add_argument(
+        "log", nargs="?", type=Path, help="path to a PX4 .ulg or ArduPilot .BIN/.log log"
+    )
+    gen.add_argument(
+        "--log-type",
+        choices=(AUTO, ULOG, ARDUPILOT),
+        default=None,
+        help="log format (default: auto-detect from the file extension)",
+    )
     gen.add_argument(
         "--config",
         type=Path,
@@ -31,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument(
         "--title",
         default=None,
-        help="report title (default: PX4 EKF2 Review: <log-stem>)",
+        help="report title (default: '<PX4 EKF2|ArduPilot Rover> Review: <log-stem>')",
     )
     gen.add_argument(
         "--divergence-threshold",
@@ -60,14 +72,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "generate":
         if args.config is not None and args.log is not None:
-            print("error: pass either a ULog path or --config, not both", file=sys.stderr)
+            print("error: pass either a log path or --config, not both", file=sys.stderr)
             return 2
         if args.config is not None:
             config = load_config(args.config)
+            if args.log_type is not None:
+                config = dataclasses.replace(
+                    config, log=dataclasses.replace(config.log, log_type=args.log_type)
+                )
         elif args.log is not None:
-            config = config_from_log(args.log, output_dir=args.output_dir, title=args.title)
+            config = config_from_log(
+                args.log,
+                output_dir=args.output_dir,
+                title=args.title,
+                log_type=args.log_type or AUTO,
+            )
         else:
-            print("error: pass a .ulg path, or use --config PATH", file=sys.stderr)
+            print("error: pass a log path, or use --config PATH", file=sys.stderr)
             return 2
         if args.divergence_threshold is not None:
             config = dataclasses.replace(config, divergence_threshold_m=args.divergence_threshold)

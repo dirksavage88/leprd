@@ -26,6 +26,8 @@ tmp/
 # Local flight logs
 logs/
 *.ulg
+*.BIN
+*.bin
 
 # Local browser/test tooling
 node_modules/

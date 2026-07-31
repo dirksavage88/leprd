@@ -17,6 +17,7 @@ import numpy as np
 from pyulog import ULog
 
 from .config import ReviewConfig
+from .logsource import ARDUPILOT, open_log, resolve_log_type
 
 
 @dataclass(frozen=True)
@@ -2929,16 +2930,13 @@ def compile_latex(tex_path: Path) -> Path:
     return pdf_path
 
 
-def generate_review(config: ReviewConfig) -> ReviewArtifacts:
-    output_dir = config.output_dir
-    fig_dir = output_dir / "figures"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    fig_dir.mkdir(parents=True, exist_ok=True)
-
-    if not config.log.path.exists():
-        raise FileNotFoundError(f"log file not found: {config.log.path}")
-
-    ulog = ULog(str(config.log.path))
+def _px4_review(
+    config: ReviewConfig, fig_dir: Path
+) -> tuple[dict[str, Path], dict[str, str], str]:
+    """Build the PX4 EKF2 figures, metrics, and LaTeX body from a ULog."""
+    # Unwrapped to the pyulog handle: the PX4 plots/metrics below read ULog
+    # attributes that are outside the LogSource interface.
+    ulog = open_log(config.log.path, config.log.log_type).raw
     base_timestamp = ulog.start_timestamp
 
     figures = {
@@ -3007,8 +3005,6 @@ def generate_review(config: ReviewConfig) -> ReviewArtifacts:
     nav_state_rows = logged_nav_state_rows(ulog, base_timestamp)
     parameter_rows = logged_parameter_rows(ulog)
 
-    summary_path = write_summary(output_dir, summary)
-
     tex = build_latex(
         config,
         figures,
@@ -3019,7 +3015,41 @@ def generate_review(config: ReviewConfig) -> ReviewArtifacts:
         nav_state_rows,
         parameter_rows,
     )
-    tex_path = output_dir / "ekf2_review.tex"
+    return figures, summary, tex
+
+
+def _rover_review(
+    config: ReviewConfig, fig_dir: Path
+) -> tuple[dict[str, Path], dict[str, str], str]:
+    """Build the ArduPilot Rover figures, metrics, and LaTeX body from a BIN."""
+    # Imported here (not at module scope) because rover imports the shared helpers
+    # from this module. open_log pulls in pymavlink lazily too.
+    from . import rover
+
+    source = open_log(config.log.path, config.log.log_type, keep_types=rover.MESSAGE_TYPES)
+    return rover.build_review(config, source, source.start_timestamp, fig_dir)
+
+
+def generate_review(config: ReviewConfig) -> ReviewArtifacts:
+    output_dir = config.output_dir
+    fig_dir = output_dir / "figures"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    if not config.log.path.exists():
+        raise FileNotFoundError(f"log file not found: {config.log.path}")
+
+    # The log's format selects the analysis: ArduPilot dataflash gets the Rover
+    # steering/EK3 review, everything else the PX4 EKF2 review.
+    is_rover = resolve_log_type(config.log.path, config.log.log_type) == ARDUPILOT
+    if is_rover:
+        figures, summary, tex = _rover_review(config, fig_dir)
+    else:
+        figures, summary, tex = _px4_review(config, fig_dir)
+
+    summary_path = write_summary(output_dir, summary)
+
+    tex_path = output_dir / ("rover_review.tex" if is_rover else "ekf2_review.tex")
     tex_path.write_text(tex, encoding="utf-8")
 
     pdf_path = compile_latex(tex_path)
