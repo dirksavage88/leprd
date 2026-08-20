@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 import shutil
 import subprocess
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.patches import Patch
 from matplotlib.ticker import MaxNLocator
-import numpy as np
 from pyulog import ULog
 
 from .config import ReviewConfig
@@ -33,6 +33,21 @@ class MetricSeries:
     t: np.ndarray
     values: np.ndarray
     source: str
+
+
+@dataclass(frozen=True)
+class SignalSeries:
+    label: str
+    t: np.ndarray
+    values: np.ndarray
+
+
+@dataclass(frozen=True)
+class ActuatorOutputSet:
+    title: str
+    ylabel: str
+    source: str
+    series: list[SignalSeries]
 
 
 @dataclass(frozen=True)
@@ -79,6 +94,40 @@ class ParameterRow:
 
 
 @dataclass(frozen=True)
+class StatusMaskRow:
+    field: str
+    observed_values: str
+    active_bits: str
+
+
+@dataclass(frozen=True)
+class SensorStatusRow:
+    sensor: str
+    name: str
+    value: str
+    status: str
+
+
+@dataclass(frozen=True)
+class ParameterBitmaskRow:
+    parameter: str
+    raw_value: str
+    bit: int
+    status: str
+    meaning: str
+
+
+@dataclass(frozen=True)
+class ParameterEnumRow:
+    parameter: str
+    raw_value: str
+    value: int
+    selected: bool
+    status: str
+    meaning: str
+
+
+@dataclass(frozen=True)
 class NavStateRow:
     value: int
     name: str
@@ -107,6 +156,21 @@ _HEIGHT_AID_SOURCES = {
     "gps_vpos": "estimator_aid_src_gnss_hgt",
 }
 
+_DIRECT_AID_METRIC_FIELDS = {
+    "flow[0]": (
+        "estimator_aid_src_optical_flow",
+        "innovation[0]",
+        "innovation_variance[0]",
+        "test_ratio[0]",
+    ),
+    "flow[1]": (
+        "estimator_aid_src_optical_flow",
+        "innovation[1]",
+        "innovation_variance[1]",
+        "test_ratio[1]",
+    ),
+}
+
 _AGGREGATE_METRIC_TOPICS = {
     "innovation": "estimator_innovations",
     "innovation_variance": "estimator_innovation_variances",
@@ -115,6 +179,14 @@ _AGGREGATE_METRIC_TOPICS = {
 
 _BOOLEAN_PANEL_HEIGHT_RATIO = 0.28
 _MODE_SHADING_ALPHA = 0.075
+_REPORT_LINE_WIDTH_SCALE = 2.0
+_ACTUATOR_SATURATION_LABELS = {
+    -2: "ACTUATOR_SATURATION_LOWER",
+    -1: "ACTUATOR_SATURATION_LOWER_DYN",
+    0: "ACTUATOR_SATURATION_OK",
+    1: "ACTUATOR_SATURATION_UPPER_DYN",
+    2: "ACTUATOR_SATURATION_UPPER",
+}
 
 # Copied from PX4 msg/versioned/VehicleStatus.msg (MESSAGE_VERSION = 4).
 PX4_NAV_STATES = {
@@ -125,7 +197,11 @@ PX4_NAV_STATES = {
     4: NavStateInfo("NAVIGATION_STATE_AUTO_LOITER", "Auto loiter mode", "#B07AA1"),
     5: NavStateInfo("NAVIGATION_STATE_AUTO_RTL", "Auto return to launch mode", "#EDC948"),
     6: NavStateInfo("NAVIGATION_STATE_POSITION_SLOW", "Position slow", "#76B7B2"),
-    7: NavStateInfo("NAVIGATION_STATE_GUIDED_COURSE", "Guided Course mode (FW: maintain course/alt/speed)", "#FF9DA7"),
+    7: NavStateInfo(
+        "NAVIGATION_STATE_GUIDED_COURSE",
+        "Guided Course mode (FW: maintain course/alt/speed)",
+        "#FF9DA7",
+    ),
     8: NavStateInfo("NAVIGATION_STATE_ALTITUDE_CRUISE", "Altitude with Cruise mode", "#9C755F"),
     9: NavStateInfo("NAVIGATION_STATE_FREE3", "Reserved/free state", "#BAB0AC"),
     10: NavStateInfo("NAVIGATION_STATE_ACRO", "Acro mode", "#1F77B4"),
@@ -138,9 +214,13 @@ PX4_NAV_STATES = {
     17: NavStateInfo("NAVIGATION_STATE_AUTO_TAKEOFF", "Takeoff", "#7F7F7F"),
     18: NavStateInfo("NAVIGATION_STATE_AUTO_LAND", "Land", "#BCBD22"),
     19: NavStateInfo("NAVIGATION_STATE_AUTO_FOLLOW_TARGET", "Auto Follow", "#17BECF"),
-    20: NavStateInfo("NAVIGATION_STATE_AUTO_PRECLAND", "Precision land with landing target", "#AEC7E8"),
+    20: NavStateInfo(
+        "NAVIGATION_STATE_AUTO_PRECLAND", "Precision land with landing target", "#AEC7E8"
+    ),
     21: NavStateInfo("NAVIGATION_STATE_ORBIT", "Orbit in a circle", "#FFBB78"),
-    22: NavStateInfo("NAVIGATION_STATE_AUTO_VTOL_TAKEOFF", "Takeoff, transition, establish loiter", "#98DF8A"),
+    22: NavStateInfo(
+        "NAVIGATION_STATE_AUTO_VTOL_TAKEOFF", "Takeoff, transition, establish loiter", "#98DF8A"
+    ),
     23: NavStateInfo("NAVIGATION_STATE_EXTERNAL1", "External mode 1", "#FF9896"),
     24: NavStateInfo("NAVIGATION_STATE_EXTERNAL2", "External mode 2", "#C5B0D5"),
     25: NavStateInfo("NAVIGATION_STATE_EXTERNAL3", "External mode 3", "#C49C94"),
@@ -180,22 +260,76 @@ _ESTIMATOR_STATUS_MEANINGS = {
     "gps_check_fail_flags": "GPS check failure bitmask",
 }
 
-_PLOTTED_FUSION_FLAG_FIELDS = [
-    "cs_gps",
-    "cs_gnss_vel",
-    "cs_gps_hgt",
-    "cs_baro_hgt",
-    "cs_rng_hgt",
-    "cs_rng_kin_consistent",
-    "cs_opt_flow",
-    "cs_gnd_effect",
-    "cs_in_air",
-    "cs_vehicle_at_rest",
-    "cs_inertial_dead_reckoning",
-    "fs_bad_acc_vertical",
-    "reject_hagl",
-    "reject_optflow_x",
-    "reject_optflow_y",
+_CONTROL_STATUS_GROUPS = [
+    (
+        "Alignment and vehicle state",
+        [
+            "cs_tilt_align",
+            "cs_yaw_align",
+            "cs_in_air",
+            "cs_fixed_wing",
+            "cs_in_transition",
+            "cs_vehicle_at_rest",
+            "cs_gnd_effect",
+            "cs_heading_observable",
+            "cs_yaw_manual",
+        ],
+    ),
+    (
+        "GNSS and global aiding",
+        [
+            "cs_gps",
+            "cs_gnss_pos",
+            "cs_gnss_vel",
+            "cs_gps_hgt",
+            "cs_gnss_yaw",
+            "cs_aux_gpos",
+        ],
+    ),
+    (
+        "Height and terrain aiding",
+        [
+            "cs_baro_hgt",
+            "cs_rng_hgt",
+            "cs_ev_hgt",
+            "cs_fake_hgt",
+            "cs_rng_terrain",
+            "cs_opt_flow_terrain",
+            "cs_rng_kin_consistent",
+            "cs_rng_stuck",
+            "cs_baro_fault",
+            "cs_rng_fault",
+            "cs_gnss_hgt_fault",
+        ],
+    ),
+    (
+        "Vision and optical flow",
+        ["cs_opt_flow", "cs_ev_pos", "cs_ev_vel", "cs_ev_yaw", "cs_ev_yaw_fault"],
+    ),
+    (
+        "Magnetometer and heading",
+        [
+            "cs_mag_hdg",
+            "cs_mag_3d",
+            "cs_mag_dec",
+            "cs_mag",
+            "cs_synthetic_mag_z",
+            "cs_mag_aligned_in_flight",
+            "cs_mag_heading_consistent",
+            "cs_mag_field_disturbed",
+            "cs_mag_fault",
+            "cs_gnss_yaw_fault",
+            "cs_gps_yaw_fault",
+        ],
+    ),
+    (
+        "Air data, wind, and auxiliary",
+        ["cs_wind", "cs_wind_dead_reckoning", "cs_fuse_beta", "cs_fuse_aspd", "cs_gravity_vector"],
+    ),
+    (
+        "Dead reckoning and fake aiding",
+        ["cs_inertial_dead_reckoning", "cs_fake_pos", "cs_valid_fake_pos", "cs_constant_pos"],
+    ),
 ]
 
 _RESET_COUNTER_FIELDS = [
@@ -204,6 +338,15 @@ _RESET_COUNTER_FIELDS = [
     "reset_count_pos_ne",
     "reset_count_pod_d",
     "reset_count_quat",
+]
+
+_LOCAL_POSITION_RESET_COUNTER_FIELDS = [
+    "xy_reset_counter",
+    "z_reset_counter",
+    "vxy_reset_counter",
+    "vz_reset_counter",
+    "heading_reset_counter",
+    "dist_bottom_reset_counter",
 ]
 
 _STATUS_MASK_FIELDS = [
@@ -215,6 +358,47 @@ _STATUS_MASK_FIELDS = [
     "health_flags",
     "timeout_flags",
 ]
+
+_PARAMETER_BITMASK_DEFINITIONS = {
+    "EKF2_IMU_CTRL": [
+        (0, "Gyro bias"),
+        (1, "Accel bias"),
+        (2, "Gravity vector fusion"),
+    ],
+    "EKF2_GPS_CTRL": [
+        (0, "Longitude and latitude fusion"),
+        (1, "Altitude fusion"),
+        (2, "3D velocity fusion"),
+        (3, "Dual antenna heading fusion"),
+    ],
+    "EKF2_MAG_CHECK": [
+        (0, "Strength (EKF2_MAG_CHK_STR)"),
+        (1, "Inclination (EKF2_MAG_CHK_INC)"),
+        (2, "Wait for WMM"),
+    ],
+    "EKF2_GPS_CHECK": [
+        (0, "Satellite count (EKF2_REQ_NSATS)"),
+        (1, "PDOP (EKF2_REQ_PDOP)"),
+        (2, "Horizontal position error / EPH (EKF2_REQ_EPH)"),
+        (3, "Vertical position error / EPV (EKF2_REQ_EPV)"),
+        (4, "Speed accuracy (EKF2_REQ_SACC)"),
+        (5, "Horizontal position drift (EKF2_REQ_HDRIFT)"),
+        (6, "Vertical position drift (EKF2_REQ_VDRIFT)"),
+        (7, "Horizontal speed offset (EKF2_REQ_HDRIFT)"),
+        (8, "Vertical speed offset/discrepancy (EKF2_REQ_VDRIFT)"),
+        (9, "Spoofing"),
+        (10, "GPS fix type (EKF2_REQ_FIX)"),
+        (11, "Jamming"),
+    ],
+}
+
+_PARAMETER_ENUM_DEFINITIONS = {
+    "EKF2_RNG_CTRL": [
+        (0, "Disable range fusion"),
+        (1, "Enabled - conditional mode"),
+        (2, "Enabled"),
+    ],
+}
 
 # Flight Review decodes estimator_status.innovation_check_flags with this grouping.
 _INNOVATION_CHECK_FLAG_GROUPS = [
@@ -382,9 +566,188 @@ _MPC_ALT_MODE_VALUES = {
     ),
 }
 
+_EXPECTED_SENSOR_STATUS_PARAMS = [
+    ("IMU", "SYS_HAS_ACC", "accelerometer availability status bit"),
+    ("IMU", "SYS_HAS_GYRO", "gyroscope availability status bit"),
+    ("Magnetometer", "SYS_HAS_MAG", "magnetometer availability status bit"),
+    ("Barometer", "SYS_HAS_BARO", "barometer availability status bit"),
+    ("GPS / GNSS", "SYS_HAS_GPS", "GNSS availability status bit"),
+    ("Range finder", "SYS_HAS_NUM_DIST", "logged number of distance sensors"),
+    ("Optical flow", "SYS_HAS_OF", "optical-flow availability status bit"),
+    ("Barometer", "EKF2_BARO_CTRL", "EKF barometer height-aiding control"),
+    ("GPS / GNSS", "EKF2_GPS_CTRL", "EKF GNSS aiding control"),
+    ("Range finder", "EKF2_RNG_CTRL", "EKF range height-aiding control"),
+    ("Optical flow", "EKF2_OF_CTRL", "EKF optical-flow aiding control"),
+    ("External vision", "EKF2_EV_CTRL", "EKF external-vision aiding control"),
+    ("IMU", "EKF2_IMU_CTRL", "EKF IMU control bitmask"),
+]
+
+_SENSOR_PARAM_ORDER = {
+    name: index for index, (_sensor, name, _note) in enumerate(_EXPECTED_SENSOR_STATUS_PARAMS)
+}
+
+
+def sensor_label_for_param(name: str) -> str:
+    explicit = {param: sensor for sensor, param, _note in _EXPECTED_SENSOR_STATUS_PARAMS}
+    if name in explicit:
+        return explicit[name]
+
+    stripped = name
+    for prefix in ("SYS_HAS_NUM_", "SYS_HAS_", "EKF2_"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :]
+            break
+    stripped = stripped.removesuffix("_CTRL")
+    return stripped.replace("_", " ").title()
+
+
+def interpret_sensor_param(name: str, value: object | None) -> str:
+    if value is None:
+        return "not logged"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "logged"
+
+    if name.startswith("SYS_HAS_"):
+        if name == "SYS_HAS_NUM_DIST":
+            return "DISABLED" if numeric <= 0 else "ENABLED"
+        return "ENABLED" if numeric > 0 else "DISABLED"
+
+    if name.startswith("EKF2_") and name.endswith("_CTRL"):
+        return "DISABLED" if numeric <= 0 else "ENABLED"
+
+    return "logged"
+
+
+def sensor_status_rows(ulog: ULog) -> list[SensorStatusRow]:
+    params = initial_parameters(ulog)
+    names = {
+        name
+        for name in params
+        if name.startswith("SYS_HAS_")
+        or (name.startswith("EKF2_") and name.endswith("_CTRL"))
+    }
+    names.update(name for _sensor, name, _note in _EXPECTED_SENSOR_STATUS_PARAMS)
+
+    def sort_key(name: str) -> tuple[int, str]:
+        return (_SENSOR_PARAM_ORDER.get(name, 10_000), name)
+
+    rows: list[SensorStatusRow] = []
+    for name in sorted(names, key=sort_key):
+        value = params.get(name)
+        rows.append(
+            SensorStatusRow(
+                sensor=sensor_label_for_param(name),
+                name=name,
+                value="not logged" if value is None else format_param_value(value),
+                status=interpret_sensor_param(name, value),
+            )
+        )
+    return rows
+
+
+def parameter_bitmask_rows(ulog: ULog) -> list[ParameterBitmaskRow]:
+    params = initial_parameters(ulog)
+    rows: list[ParameterBitmaskRow] = []
+
+    for name, bit_defs in _PARAMETER_BITMASK_DEFINITIONS.items():
+        value = params.get(name)
+        if value is None:
+            for bit, meaning in bit_defs:
+                rows.append(
+                    ParameterBitmaskRow(
+                        parameter=name,
+                        raw_value="not logged",
+                        bit=bit,
+                        status="NOT LOGGED",
+                        meaning=meaning,
+                    )
+                )
+            continue
+
+        try:
+            mask = round(float(value))
+        except (TypeError, ValueError):
+            mask = 0
+            raw_value = str(value)
+        else:
+            raw_value = str(mask)
+
+        for bit, meaning in bit_defs:
+            enabled = bool(mask & (1 << bit))
+            rows.append(
+                ParameterBitmaskRow(
+                    parameter=name,
+                    raw_value=raw_value,
+                    bit=bit,
+                    status="ENABLED" if enabled else "DISABLED",
+                    meaning=meaning,
+                )
+            )
+    return rows
+
+
+def parameter_enum_rows(ulog: ULog) -> list[ParameterEnumRow]:
+    params = initial_parameters(ulog)
+    rows: list[ParameterEnumRow] = []
+
+    for name, value_defs in _PARAMETER_ENUM_DEFINITIONS.items():
+        value = params.get(name)
+        if value is None:
+            for option, meaning in value_defs:
+                rows.append(
+                    ParameterEnumRow(
+                        parameter=name,
+                        raw_value="not logged",
+                        value=option,
+                        selected=False,
+                        status="NOT LOGGED",
+                        meaning=meaning,
+                    )
+                )
+            continue
+
+        try:
+            selected_value = round(float(value))
+        except (TypeError, ValueError):
+            selected_value = -1
+            raw_value = str(value)
+        else:
+            raw_value = str(selected_value)
+
+        for option, meaning in value_defs:
+            selected = option == selected_value
+            if selected and option == 0:
+                status = "DISABLED"
+            elif selected:
+                status = "ENABLED"
+            else:
+                status = "not selected"
+
+            rows.append(
+                ParameterEnumRow(
+                    parameter=name,
+                    raw_value=raw_value,
+                    value=option,
+                    selected=selected,
+                    status=status,
+                    meaning=meaning,
+                )
+            )
+    return rows
+
+
 def get_ds(ulog: ULog, name: str, multi_id: int = 0):
     matches = [d for d in ulog.data_list if d.name == name and d.multi_id == multi_id]
     return matches[0] if matches else None
+
+
+def get_all_ds(ulog: ULog, name: str) -> list:
+    return sorted(
+        [d for d in ulog.data_list if d.name == name],
+        key=lambda item: getattr(item, "multi_id", 0),
+    )
 
 
 def t_rel(ds, base_timestamp: int) -> np.ndarray:
@@ -409,8 +772,8 @@ def log_start_utc_us(ulog: ULog, base_timestamp: int) -> int | None:
 def system_time_note(ulog: ULog, base_timestamp: int) -> str:
     start_utc_us = log_start_utc_us(ulog, base_timestamp)
     if start_utc_us is None:
-        return "UTC system time unavailable: ULog metadata does not contain boot_time_utc_us."
-    start_time = datetime.fromtimestamp(start_utc_us / 1e6, timezone.utc)
+        return ""
+    start_time = datetime.fromtimestamp(start_utc_us / 1e6, UTC)
     return f"UTC system time available from boot_time_utc_us; log start {start_time.isoformat()}."
 
 
@@ -426,8 +789,7 @@ def add_system_time_axis(ax, ulog: ULog, base_timestamp: int) -> bool:
         return False
 
     datetimes = [
-        datetime.fromtimestamp((start_utc_us + int(round(tick * 1e6))) / 1e6, timezone.utc)
-        for tick in ticks
+        datetime.fromtimestamp((start_utc_us + round(tick * 1e6)) / 1e6, UTC) for tick in ticks
     ]
     labels = [dt.strftime("%H:%M:%S") for dt in datetimes]
     date_label = datetimes[0].strftime("%Y-%m-%d UTC")
@@ -444,17 +806,109 @@ def arr(ds, field: str, dtype=float) -> np.ndarray:
     return np.asarray(ds.data[field], dtype=dtype)
 
 
-def get_metric_series(ulog: ULog, base_timestamp: int, key: str, metric: str) -> MetricSeries | None:
+def time_since_last_fuse_s(ds, base_timestamp: int) -> tuple[np.ndarray, np.ndarray] | None:
+    if ds is None or "time_last_fuse" not in ds.data or "timestamp" not in ds.data:
+        return None
+
+    timestamp = arr(ds, "timestamp", np.uint64).astype(float)
+    time_last_fuse = arr(ds, "time_last_fuse", np.uint64).astype(float)
+    count = min(len(timestamp), len(time_last_fuse))
+    if count == 0:
+        return None
+
+    timestamp = timestamp[:count]
+    time_last_fuse = time_last_fuse[:count]
+    valid = (time_last_fuse > 0) & (timestamp >= time_last_fuse)
+    delta_s = np.full(count, np.nan)
+    delta_s[valid] = (timestamp[valid] - time_last_fuse[valid]) / 1e6
+    return (timestamp - int(base_timestamp)) / 1e6, delta_s
+
+
+def measurement_interval_s(
+    ds, base_timestamp: int, sample_timestamp_field: str = "timestamp_sample"
+) -> tuple[np.ndarray, np.ndarray, str] | None:
+    if ds is None or "timestamp" not in ds.data:
+        return None
+
+    source_field = sample_timestamp_field if sample_timestamp_field in ds.data else "timestamp"
+    timestamp = arr(ds, "timestamp", np.uint64).astype(float)
+    sample_timestamp = arr(ds, source_field, np.uint64).astype(float)
+    count = min(len(timestamp), len(sample_timestamp))
+    if count == 0:
+        return None
+
+    timestamp = timestamp[:count]
+    sample_timestamp = sample_timestamp[:count]
+    interval_s = np.full(count, np.nan)
+    if count > 1:
+        delta_us = np.diff(sample_timestamp)
+        valid = delta_us > 0
+        interval_s[np.nonzero(valid)[0] + 1] = delta_us[valid] / 1e6
+    return (timestamp - int(base_timestamp)) / 1e6, interval_s, source_field
+
+
+def measurement_latency_s(
+    ds, base_timestamp: int, sample_timestamp_field: str = "timestamp_sample"
+) -> tuple[np.ndarray, np.ndarray, str] | None:
+    if ds is None or "timestamp" not in ds.data or sample_timestamp_field not in ds.data:
+        return None
+
+    timestamp = arr(ds, "timestamp", np.uint64).astype(float)
+    sample_timestamp = arr(ds, sample_timestamp_field, np.uint64).astype(float)
+    count = min(len(timestamp), len(sample_timestamp))
+    if count == 0:
+        return None
+
+    timestamp = timestamp[:count]
+    sample_timestamp = sample_timestamp[:count]
+    latency_s = np.full(count, np.nan)
+    valid = sample_timestamp > 0
+    latency_s[valid] = (timestamp[valid] - sample_timestamp[valid]) / 1e6
+    return (timestamp - int(base_timestamp)) / 1e6, latency_s, sample_timestamp_field
+
+
+def measurement_count_s(ds, base_timestamp: int) -> tuple[np.ndarray, np.ndarray] | None:
+    if ds is None or "timestamp" not in ds.data:
+        return None
+
+    timestamp = arr(ds, "timestamp", np.uint64).astype(float)
+    if not len(timestamp):
+        return None
+
+    return (timestamp - int(base_timestamp)) / 1e6, np.arange(1, len(timestamp) + 1)
+
+
+def get_metric_series(
+    ulog: ULog, base_timestamp: int, key: str, metric: str
+) -> MetricSeries | None:
     """Return a scalar EKF innovation metric.
 
     Prefer newer estimator_aid_src_* topics for scalar height sources, then fall back
     to the aggregate estimator_innovations-style topics used by older/replay logs.
     """
+    direct_fields = _DIRECT_AID_METRIC_FIELDS.get(key)
+    if direct_fields is not None:
+        aid_topic, innovation_field, variance_field, ratio_field = direct_fields
+        metric_field = {
+            "innovation": innovation_field,
+            "innovation_variance": variance_field,
+            "test_ratio": ratio_field,
+        }[metric]
+        aid = get_ds(ulog, aid_topic)
+        if aid is not None and metric_field in aid.data:
+            return MetricSeries(
+                t_rel(aid, base_timestamp),
+                arr(aid, metric_field),
+                f"{aid_topic}.{metric_field}",
+            )
+
     aid_topic = _HEIGHT_AID_SOURCES.get(key)
     if aid_topic is not None:
         aid = get_ds(ulog, aid_topic)
         if aid is not None and metric in aid.data:
-            return MetricSeries(t_rel(aid, base_timestamp), arr(aid, metric), f"{aid_topic}.{metric}")
+            return MetricSeries(
+                t_rel(aid, base_timestamp), arr(aid, metric), f"{aid_topic}.{metric}"
+            )
 
     aggregate_topic = _AGGREGATE_METRIC_TOPICS[metric]
     aggregate = get_ds(ulog, aggregate_topic)
@@ -466,6 +920,31 @@ def get_metric_series(ulog: ULog, base_timestamp: int, key: str, metric: str) ->
         )
 
     return None
+
+
+def rangefinder_test_ratio_series(
+    ulog: ULog, base_timestamp: int
+) -> tuple[MetricSeries | None, MetricSeries | None]:
+    aid = get_ds(ulog, "estimator_aid_src_rng_hgt")
+    if aid is not None and "test_ratio" in aid.data:
+        range_height = MetricSeries(
+            t_rel(aid, base_timestamp),
+            arr(aid, "test_ratio"),
+            "estimator_aid_src_rng_hgt.test_ratio",
+        )
+    else:
+        aggregate = get_ds(ulog, "estimator_innovation_test_ratios")
+        range_height = None
+        if aggregate is not None:
+            fallback_field = "hagl" if "hagl" in aggregate.data else "rng_vpos"
+            if fallback_field in aggregate.data:
+                range_height = MetricSeries(
+                    t_rel(aggregate, base_timestamp),
+                    arr(aggregate, fallback_field),
+                    f"estimator_innovation_test_ratios.{fallback_field}",
+                )
+
+    return range_height, get_metric_series(ulog, base_timestamp, "hagl_rate", "test_ratio")
 
 
 def gps_alt_m(ds) -> np.ndarray:
@@ -486,7 +965,7 @@ def format_param_value(value: object) -> str:
     except (TypeError, ValueError):
         return str(value)
     if abs(numeric - round(numeric)) < 1e-6:
-        return str(int(round(numeric)))
+        return str(round(numeric))
     return f"{numeric:.3g}"
 
 
@@ -558,7 +1037,9 @@ def describe_rangefinder_config(ulog: ULog) -> RangefinderConfig:
         for name, label in _RANGEFINDER_ENABLE_PARAMS.items()
         if name in params and param_enabled(params[name])
     ]
-    configured_hardware = ", ".join(enabled) if enabled else "no enabled rangefinder driver params found"
+    configured_hardware = (
+        ", ".join(enabled) if enabled else "no enabled rangefinder driver params found"
+    )
 
     details = [
         f"{name}={format_param_value(params[name])}"
@@ -568,11 +1049,17 @@ def describe_rangefinder_config(ulog: ULog) -> RangefinderConfig:
     param_summary = "; ".join(details) if details else "no rangefinder-specific params found"
 
     if has_topic:
-        report_summary = f"{topic_summary}; configured hardware: {configured_hardware}; params: {param_summary}"
+        report_summary = (
+            f"{topic_summary}; configured hardware: {configured_hardware}; params: {param_summary}"
+        )
     else:
-        report_summary = f"{topic_summary}; configured hardware: {configured_hardware}; params: {param_summary}"
+        report_summary = (
+            f"{topic_summary}; configured hardware: {configured_hardware}; params: {param_summary}"
+        )
 
-    return RangefinderConfig(has_topic, topic_summary, configured_hardware, param_summary, report_summary)
+    return RangefinderConfig(
+        has_topic, topic_summary, configured_hardware, param_summary, report_summary
+    )
 
 
 def describe_mpc_alt_mode(ulog: ULog) -> dict[str, str]:
@@ -586,7 +1073,7 @@ def describe_mpc_alt_mode(ulog: ULog) -> dict[str, str]:
         }
 
     try:
-        value = int(round(float(params["MPC_ALT_MODE"])))
+        value = round(float(params["MPC_ALT_MODE"]))
     except (TypeError, ValueError):
         value = -1
 
@@ -597,9 +1084,7 @@ def describe_mpc_alt_mode(ulog: ULog) -> dict[str, str]:
 
     related_names = ["MPC_HOLD_MAX_XY", "MPC_HOLD_MAX_Z", "EKF2_HGT_REF", "EKF2_RNG_CTRL"]
     related = [
-        f"{name}={format_param_value(params[name])}"
-        for name in related_names
-        if name in params
+        f"{name}={format_param_value(params[name])}" for name in related_names if name in params
     ]
 
     return {
@@ -616,20 +1101,24 @@ def gps_disabled_label(ulog: ULog) -> str | None:
         if name not in params:
             continue
         try:
-            if int(round(float(params[name]))) == 0:
+            if round(float(params[name])) == 0:
                 return f"{name}=0"
         except (TypeError, ValueError):
             continue
     return None
 
 
-def logged_parameter_rows(ulog: ULog, prefixes: tuple[str, ...] = ("EKF2_", "MPC_")) -> list[ParameterRow]:
+def logged_parameter_rows(
+    ulog: ULog, prefixes: tuple[str, ...] = ("EKF2_", "MPC_", "SENS_", "SDLOG_")
+) -> list[ParameterRow]:
     rows: list[ParameterRow] = []
     for name, value in sorted(initial_parameters(ulog).items()):
         prefix = next((item for item in prefixes if name.startswith(item)), None)
         if prefix is None:
             continue
-        rows.append(ParameterRow(prefix=prefix.rstrip("_"), name=name, value=format_param_value(value)))
+        rows.append(
+            ParameterRow(prefix=prefix.rstrip("_"), name=name, value=format_param_value(value))
+        )
     return rows
 
 
@@ -669,7 +1158,15 @@ def nav_state_spans(ulog: ULog, base_timestamp: int) -> list[ModeSpan]:
     return spans
 
 
-def shade_mode_background(ax_or_axes, ulog: ULog, base_timestamp: int, enabled: bool = True):
+def shade_mode_background(
+    ax_or_axes,
+    ulog: ULog,
+    base_timestamp: int,
+    enabled: bool = True,
+    alpha: float = _MODE_SHADING_ALPHA,
+    highlight_values: set[int] | None = None,
+    highlight_alpha: float = 0.16,
+):
     if not enabled:
         return
 
@@ -677,6 +1174,7 @@ def shade_mode_background(ax_or_axes, ulog: ULog, base_timestamp: int, enabled: 
     if not spans:
         return
 
+    highlighted = {14} if highlight_values is None else highlight_values
     axes = np.ravel(np.atleast_1d(ax_or_axes))
     for ax in axes:
         has_data = ax.has_data()
@@ -688,7 +1186,25 @@ def shade_mode_background(ax_or_axes, ulog: ULog, base_timestamp: int, enabled: 
             end = min(span.end_s, xlim[1])
             if end <= start:
                 continue
-            ax.axvspan(start, end, color=nav_state_color(span.value), alpha=_MODE_SHADING_ALPHA, lw=0, zorder=0)
+            ax.axvspan(
+                start,
+                end,
+                color=nav_state_color(span.value),
+                alpha=alpha,
+                lw=0,
+                zorder=0,
+            )
+        for span in spans:
+            if span.value not in highlighted:
+                continue
+            start = max(span.start_s, xlim[0])
+            end = min(span.end_s, xlim[1])
+            if end <= start:
+                continue
+            color = nav_state_color(span.value)
+            ax.axvspan(start, end, color=color, alpha=highlight_alpha, lw=0, zorder=0.1)
+            ax.axvline(start, color=color, lw=1.0, ls=":", alpha=0.9, zorder=0.2)
+            ax.axvline(end, color=color, lw=1.0, ls=":", alpha=0.9, zorder=0.2)
         ax.set_xlim(xlim)
 
 
@@ -781,6 +1297,35 @@ def interp_at(src_t: np.ndarray, src_y: np.ndarray, dst_t: np.ndarray) -> np.nda
     return np.interp(dst_t, src_t[finite], src_y[finite], left=np.nan, right=np.nan)
 
 
+def local_minus_ev_position_delta(
+    odom,
+    local_position,
+    base_timestamp: int,
+    ev_position_field: str,
+    local_position_field: str,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if (
+        odom is None
+        or local_position is None
+        or ev_position_field not in odom.data
+        or local_position_field not in local_position.data
+    ):
+        return None
+
+    t_ev = t_rel(odom, base_timestamp)
+    ev_position = arr(odom, ev_position_field)
+    t_local = t_rel(local_position, base_timestamp)
+    local_value = arr(local_position, local_position_field)
+    count = min(len(t_ev), len(ev_position))
+    if count == 0:
+        return None
+
+    t_ev = t_ev[:count]
+    ev_position = ev_position[:count]
+    local_at_ev = interp_at(t_local, local_value, t_ev)
+    return t_ev, local_at_ev - ev_position
+
+
 def bool_spans(t: np.ndarray, values: np.ndarray) -> list[tuple[float, float]]:
     vals = np.asarray(values).astype(bool)
     spans: list[tuple[float, float]] = []
@@ -850,6 +1395,22 @@ def true_duration(t: np.ndarray, values: np.ndarray) -> float:
     return float(np.sum(sample_durations(t)[vals]))
 
 
+def boolean_time_percentage_label(t: np.ndarray, values: np.ndarray) -> str | None:
+    count = min(len(t), len(values))
+    if count == 0:
+        return None
+
+    durations = sample_durations(np.asarray(t[:count], dtype=float))
+    finite = np.isfinite(durations)
+    total_s = float(np.sum(durations[finite]))
+    if total_s <= 0.0:
+        return None
+
+    vals = np.asarray(values[:count]).astype(bool)
+    enabled_s = float(np.sum(durations[finite & vals]))
+    return f"{100.0 * enabled_s / total_s:.1f}% enabled time"
+
+
 def counter_step_indices(values: np.ndarray) -> np.ndarray:
     counters = np.asarray(values, dtype=int)
     if counters.size == 0:
@@ -876,6 +1437,44 @@ def quat_delta_text(ds, index: int) -> str:
         )
     )
     return f"{angle_deg:.2f} deg quaternion, {yaw_deg:.2f} deg yaw"
+
+
+def local_position_reset_delta_text(ds, field: str, index: int) -> str:
+    if field == "xy_reset_counter":
+        if "delta_xy[0]" in ds.data and "delta_xy[1]" in ds.data:
+            dx = float(ds.data["delta_xy[0]"][index])
+            dy = float(ds.data["delta_xy[1]"][index])
+            return f"dx={dx:.3f} m, dy={dy:.3f} m"
+        return "delta xy not logged"
+
+    if field == "z_reset_counter":
+        if "delta_z" in ds.data:
+            return f"{float(ds.data['delta_z'][index]):.3f} m z"
+        return "delta z not logged"
+
+    if field == "vxy_reset_counter":
+        if "delta_vxy[0]" in ds.data and "delta_vxy[1]" in ds.data:
+            dvx = float(ds.data["delta_vxy[0]"][index])
+            dvy = float(ds.data["delta_vxy[1]"][index])
+            return f"dvx={dvx:.3f} m/s, dvy={dvy:.3f} m/s"
+        return "delta vxy not logged"
+
+    if field == "vz_reset_counter":
+        if "delta_vz" in ds.data:
+            return f"{float(ds.data['delta_vz'][index]):.3f} m/s vz"
+        return "delta vz not logged"
+
+    if field == "heading_reset_counter":
+        if "delta_heading" in ds.data:
+            return f"{np.degrees(float(ds.data['delta_heading'][index])):.2f} deg heading"
+        return "delta heading not logged"
+
+    if field == "dist_bottom_reset_counter":
+        if "delta_dist_bottom" in ds.data:
+            return f"{float(ds.data['delta_dist_bottom'][index]):.3f} m HAGL"
+        return "delta dist_bottom not logged"
+
+    return "delta not logged"
 
 
 def resampled_armed_mask(ulog: ULog, base_timestamp: int, t: np.ndarray) -> np.ndarray:
@@ -984,23 +1583,23 @@ def reset_event_rows(ulog: ULog, base_timestamp: int) -> list[ResetEventRow]:
             )
 
     local_position = get_ds(ulog, "vehicle_local_position")
-    if local_position is not None and "heading_reset_counter" in local_position.data:
+    if local_position is not None:
         t = t_rel(local_position, base_timestamp)
-        counter = arr(local_position, "heading_reset_counter", int)
-        for index in counter_step_indices(counter):
-            if "delta_heading" in local_position.data:
-                delta = f"{np.degrees(float(local_position.data['delta_heading'][index])):.2f} deg heading"
-            else:
-                delta = "delta heading not logged"
-            rows.append(
-                ResetEventRow(
-                    "vehicle_local_position.heading_reset_counter",
-                    float(t[index]),
-                    int(counter[index - 1]) if index > 0 else int(counter[index]),
-                    int(counter[index]),
-                    delta,
+        for field in _LOCAL_POSITION_RESET_COUNTER_FIELDS:
+            if field not in local_position.data:
+                continue
+
+            counter = arr(local_position, field, int)
+            for index in counter_step_indices(counter):
+                rows.append(
+                    ResetEventRow(
+                        f"vehicle_local_position.{field}",
+                        float(t[index]),
+                        int(counter[index - 1]) if index > 0 else int(counter[index]),
+                        int(counter[index]),
+                        local_position_reset_delta_text(local_position, field, int(index)),
+                    )
                 )
-            )
 
     return sorted(rows, key=lambda row: row.time_s)
 
@@ -1016,15 +1615,15 @@ def estimator_exception_rows(ulog: ULog, base_timestamp: int) -> list[EstimatorE
                 continue
             duration, _percent, spans = result
             if duration > 0.0:
-                rows.append(EstimatorExceptionRow("estimator_status", field, meaning, duration, spans))
+                rows.append(
+                    EstimatorExceptionRow("estimator_status", field, meaning, duration, spans)
+                )
 
     flags = get_ds(ulog, "estimator_status_flags")
     if flags is not None:
         for field in flags.data:
             if not (
-                field.startswith("fs_")
-                or field.startswith("reject_")
-                or field in _ESTIMATOR_STATUS_FLAG_MEANINGS
+                field.startswith(("fs_", "reject_")) or field in _ESTIMATOR_STATUS_FLAG_MEANINGS
             ):
                 continue
             meaning = _ESTIMATOR_STATUS_FLAG_MEANINGS.get(field, field.replace("_", " "))
@@ -1033,7 +1632,9 @@ def estimator_exception_rows(ulog: ULog, base_timestamp: int) -> list[EstimatorE
                 continue
             duration, _percent, spans = result
             if duration > 0.0:
-                rows.append(EstimatorExceptionRow("estimator_status_flags", field, meaning, duration, spans))
+                rows.append(
+                    EstimatorExceptionRow("estimator_status_flags", field, meaning, duration, spans)
+                )
 
     events = get_ds(ulog, "estimator_event_flags")
     if events is not None:
@@ -1043,7 +1644,9 @@ def estimator_exception_rows(ulog: ULog, base_timestamp: int) -> list[EstimatorE
                 continue
             duration, _percent, spans = result
             if duration > 0.0:
-                rows.append(EstimatorExceptionRow("estimator_event_flags", field, meaning, duration, spans))
+                rows.append(
+                    EstimatorExceptionRow("estimator_event_flags", field, meaning, duration, spans)
+                )
 
     gps_status = get_ds(ulog, "estimator_gps_status")
     if gps_status is not None:
@@ -1053,14 +1656,51 @@ def estimator_exception_rows(ulog: ULog, base_timestamp: int) -> list[EstimatorE
                 continue
             duration, _percent, spans = result
             if duration > 0.0:
-                rows.append(EstimatorExceptionRow("estimator_gps_status", field, meaning, duration, spans))
+                rows.append(
+                    EstimatorExceptionRow("estimator_gps_status", field, meaning, duration, spans)
+                )
 
+    return rows
+
+
+def active_bit_indices(values: np.ndarray) -> list[int]:
+    raw_values = np.asarray(values, dtype=np.uint64)
+    if raw_values.size == 0:
+        return []
+    observed = int(np.bitwise_or.reduce(raw_values))
+    return [bit for bit in range(observed.bit_length()) if observed & (1 << bit)]
+
+
+def status_mask_rows(ulog: ULog) -> list[StatusMaskRow]:
+    status = get_ds(ulog, "estimator_status")
+    rows: list[StatusMaskRow] = []
+    if status is None:
+        return rows
+
+    for field in available_fields(status, _STATUS_MASK_FIELDS):
+        values = arr(status, field, int)
+        observed_values = ", ".join(
+            str(value) for value in sorted({int(value) for value in values})
+        )
+        active_bits = active_bit_indices(values)
+        rows.append(
+            StatusMaskRow(
+                field=field,
+                observed_values=observed_values if observed_values else "none",
+                active_bits=", ".join(f"bit {bit}" for bit in active_bits)
+                if active_bits
+                else "none",
+            )
+        )
     return rows
 
 
 def save_fig(fig, fig_dir: Path, name: str) -> Path:
     png = fig_dir / f"{name}.png"
     pdf = fig_dir / f"{name}.pdf"
+    for ax in fig.axes:
+        for line in ax.lines:
+            line.set_linewidth(line.get_linewidth() * _REPORT_LINE_WIDTH_SCALE)
     fig.savefig(png, dpi=180, bbox_inches="tight")
     fig.savefig(pdf, bbox_inches="tight")
     plt.close(fig)
@@ -1074,10 +1714,46 @@ def setup_axis(ax, title: str, ylabel: str | None = None):
     ax.grid(True, alpha=0.25)
 
 
+def setup_latency_axis(ax, values_ms: np.ndarray):
+    finite = np.asarray(values_ms, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    ax.axhline(0, color="gray", lw=0.7, ls=":")
+
+    if not finite.size:
+        return
+
+    y_min = float(np.nanmin(finite))
+    y_max = float(np.nanmax(finite))
+    if max(abs(y_min), abs(y_max)) > 1_000.0:
+        ax.set_yscale("symlog", linthresh=1.0)
+        return
+
+    span = y_max - y_min
+    margin = max(0.1, span * 0.15)
+    ax.set_ylim(min(0.0, y_min - margin), max(0.0, y_max + margin))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+
+
 def setup_boolean_axis(ax, title: str):
     setup_axis(ax, title, "0/1")
     ax.set_ylim(-0.1, 1.1)
     ax.set_yticks([0, 1])
+
+
+def plot_scalar_trace(
+    ax, t: np.ndarray, values: np.ndarray, title: str, ylabel: str, color: str = "tab:blue"
+):
+    ax.plot(t, values, lw=0.9, color=color)
+    setup_axis(ax, title, ylabel)
+
+
+def plot_boolean_trace(ax, t: np.ndarray, values: np.ndarray, title: str, color: str = "tab:blue"):
+    count = min(len(t), len(values))
+    if count:
+        ax.step(t[:count], np.asarray(values[:count], dtype=int), where="post", lw=1.0, color=color)
+    else:
+        plot_unavailable(ax, "not logged")
+    setup_boolean_axis(ax, title)
 
 
 def setup_integer_value_axis(ax, values: np.ndarray):
@@ -1098,6 +1774,217 @@ def setup_integer_value_axis(ax, values: np.ndarray):
         ax.set_yticks(np.arange(y_min, y_max + 1))
     else:
         ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=4))
+
+
+def plot_optical_flow_measurement_counts(ax, ulog: ULog, base_timestamp: int):
+    plotted = False
+    all_counts = []
+    for topic, color in [
+        ("sensor_optical_flow", "tab:green"),
+        ("vehicle_optical_flow", "tab:purple"),
+    ]:
+        datasets = get_all_ds(ulog, topic)
+        include_instance = len(datasets) > 1
+        for ds in datasets:
+            count_result = measurement_count_s(ds, base_timestamp)
+            if count_result is None:
+                continue
+
+            t_count, counts = count_result
+            instance = f"[{ds.multi_id}]" if include_instance else ""
+            label = f"{topic}{instance} ({int(counts[-1])} samples)"
+            ax.step(t_count, counts, where="post", lw=0.9, color=color, label=label)
+            all_counts.append(counts)
+            plotted = True
+
+    if plotted:
+        setup_integer_value_axis(ax, np.concatenate(all_counts))
+    else:
+        plot_unavailable(ax, "sensor_optical_flow/vehicle_optical_flow not logged")
+    setup_axis(ax, "Optical-flow measurement count", "count")
+
+
+def plot_unavailable(ax, message: str):
+    ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+
+
+def add_vibration_threshold_bands(ax, green_limit: float = 5.0, yellow_limit: float = 10.0):
+    y_min, y_max = ax.get_ylim()
+    upper = max(y_max, yellow_limit * 1.15)
+    ax.axhspan(0.0, green_limit, color="tab:green", alpha=0.08, lw=0, zorder=0)
+    ax.axhspan(green_limit, yellow_limit, color="gold", alpha=0.11, lw=0, zorder=0)
+    ax.axhspan(yellow_limit, upper, color="tab:red", alpha=0.08, lw=0, zorder=0)
+    ax.axhline(green_limit, color="tab:green", lw=0.8, ls="--", alpha=0.65, label="<5")
+    ax.axhline(yellow_limit, color="tab:red", lw=0.8, ls="--", alpha=0.65, label="<10")
+    ax.set_ylim(min(y_min, 0.0), upper)
+
+
+def plot_boolean_group(
+    ax,
+    t: np.ndarray,
+    series: list[tuple[str, np.ndarray, str]],
+    title: str,
+):
+    plot_boolean_group_sources(
+        ax,
+        [(label, t, values, color) for label, values, color in series],
+        title,
+    )
+
+
+def plot_boolean_group_sources(
+    ax,
+    series: list[tuple[str, np.ndarray, np.ndarray, str]],
+    title: str,
+):
+    plotted = False
+    yticks = []
+    yticklabels = []
+    for index, (label, t, values, color) in enumerate(series):
+        values = np.asarray(values, dtype=int)
+        t = np.asarray(t, dtype=float)
+        count = min(values.size, t.size)
+        if count == 0:
+            continue
+        offset = index * 1.35
+        ax.step(t[:count], values[:count] + offset, where="post", lw=1.0, color=color, label=label)
+        yticks.append(offset + 0.5)
+        yticklabels.append(label)
+        plotted = True
+
+    if not plotted:
+        plot_unavailable(ax, "no requested status fields logged")
+    if yticks:
+        ax.set_yticks(yticks)
+        ax.set_yticklabels(yticklabels, fontsize=14)
+        ax.set_ylim(-0.15, yticks[-1] + 0.85)
+    setup_axis(ax, title)
+
+
+def status_flag_series(flags, fields: list[str]) -> list[tuple[str, np.ndarray, str]]:
+    colors = [
+        "tab:blue",
+        "tab:orange",
+        "tab:red",
+        "tab:green",
+        "tab:purple",
+        "tab:brown",
+        "tab:pink",
+    ]
+    if flags is None:
+        return []
+    out = []
+    for index, field in enumerate(fields):
+        if field in flags.data:
+            out.append((field, arr(flags, field, int), colors[index % len(colors)]))
+    return out
+
+
+def control_status_flag_groups(flags) -> list[tuple[str, list[str]]]:
+    if flags is None:
+        return []
+
+    logged_cs_fields = [field for field in flags.data if field.startswith("cs_")]
+    used: set[str] = set()
+    groups: list[tuple[str, list[str]]] = []
+    for title, requested_fields in _CONTROL_STATUS_GROUPS:
+        fields = [field for field in requested_fields if field in flags.data]
+        if fields:
+            groups.append((title, fields))
+            used.update(fields)
+
+    remaining = [field for field in logged_cs_fields if field not in used]
+    if remaining:
+        groups.append(("Other control status fields", remaining))
+
+    return groups
+
+
+def aid_test_ratio_fields(ds) -> list[str]:
+    if ds is None:
+        return []
+    return sorted(
+        [field for field in ds.data if field == "test_ratio" or field.startswith("test_ratio[")],
+        key=lambda field: (len(field), field),
+    )
+
+
+def plot_direct_test_ratios(ax, ds, base_timestamp: int, title: str, prefix: str):
+    plotted = False
+    if ds is not None:
+        t = t_rel(ds, base_timestamp)
+        colors = ["tab:blue", "tab:orange", "tab:red", "tab:green"]
+        for index, field in enumerate(aid_test_ratio_fields(ds)):
+            y = np.where(np.isfinite(arr(ds, field)), arr(ds, field), np.nan)
+            ax.plot(t, y, lw=0.9, color=colors[index % len(colors)], label=f"{prefix}.{field}")
+            plotted = True
+    ax.axhline(1.0, color="black", lw=0.9, ls="--", label="gate (1.0)")
+    if plotted:
+        ax.set_yscale("symlog", linthresh=0.1)
+    else:
+        plot_unavailable(ax, f"{prefix}.test_ratio not logged")
+    setup_axis(ax, title, "test ratio")
+    ax.legend(loc="best", fontsize=7, ncols=2)
+
+
+def logged_gate_label(ulog: ULog, parameter: str) -> str:
+    params = initial_parameters(ulog)
+    if parameter in params:
+        return f"{parameter}={format_param_value(params[parameter])}"
+    return f"{parameter} not logged"
+
+
+def ev_test_ratio_panel_specs(ulog: ULog) -> list[tuple[str, str, list[str], str]]:
+    """Return EV aid-source test-ratio panels available in the log."""
+    candidates = [
+        (
+            "estimator_aid_src_ev_pos",
+            f"EV horizontal position innovation test ratios ({logged_gate_label(ulog, 'EKF2_EVP_GATE')})",
+            ["test_ratio[0]", "test_ratio[1]"],
+            "EV position",
+        ),
+        (
+            "estimator_aid_src_ev_vel",
+            f"EV velocity innovation test ratios ({logged_gate_label(ulog, 'EKF2_EVV_GATE')})",
+            ["test_ratio[0]", "test_ratio[1]", "test_ratio[2]"],
+            "EV velocity",
+        ),
+        (
+            "estimator_aid_src_ev_hgt",
+            f"EV height innovation test ratio ({logged_gate_label(ulog, 'EKF2_EVP_GATE')})",
+            ["test_ratio"],
+            "EV height",
+        ),
+        (
+            "estimator_aid_src_ev_yaw",
+            f"EV yaw innovation test ratio ({logged_gate_label(ulog, 'EKF2_HDG_GATE')})",
+            ["test_ratio"],
+            "EV yaw",
+        ),
+    ]
+
+    specs = []
+    for topic, title, fields, label_prefix in candidates:
+        ds = get_ds(ulog, topic)
+        if ds is None:
+            continue
+        available = [field for field in fields if field in ds.data]
+        if available:
+            specs.append((topic, title, available, label_prefix))
+    return specs
+
+
+def plot_ev_test_ratio_panel(
+    ax, ds, base_timestamp: int, title: str, fields: list[str], label_prefix: str
+):
+    t = t_rel(ds, base_timestamp)
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+    for index, field in enumerate(fields):
+        values = np.where(np.isfinite(arr(ds, field)), arr(ds, field), np.nan)
+        ax.plot(t, values, lw=0.9, color=colors[index % len(colors)], label=f"{label_prefix} {field}")
+    ax.axhline(1.0, color="black", lw=0.9, ls="--", label="rejection gate (1.0)")
+    ax.set_yscale("symlog", linthresh=0.1)
+    setup_axis(ax, title, "test ratio")
 
 
 def available_fields(ds, candidate_fields: list[str]) -> list[str]:
@@ -1124,6 +2011,137 @@ def get_thrust(ulog: ULog, base_timestamp: int) -> tuple[np.ndarray, np.ndarray]
         return t, arr(actuator, "control[3]")
 
     return None
+
+
+def finite_signal(values: np.ndarray) -> np.ndarray:
+    return np.asarray(values, dtype=float)
+
+
+def has_nonconstant_signal(values: np.ndarray) -> bool:
+    y = finite_signal(values)
+    finite = y[np.isfinite(y)]
+    if finite.size == 0:
+        return False
+    return bool(np.nanmax(finite) - np.nanmin(finite) > 1e-9)
+
+
+def get_motor_output_set(ulog: ULog, base_timestamp: int) -> ActuatorOutputSet | None:
+    motors = get_ds(ulog, "actuator_motors")
+    if motors is not None:
+        t = t_rel(motors, base_timestamp)
+        series: list[SignalSeries] = []
+        for index in range(12):
+            field = f"control[{index}]"
+            if field not in motors.data:
+                break
+            values = finite_signal(motors.data[field])
+            if np.isnan(values).all():
+                break
+            series.append(SignalSeries(f"Motor {index + 1}", t, values))
+        if series:
+            return ActuatorOutputSet(
+                "Motor outputs (actuator_motors)",
+                "normalized",
+                "actuator_motors.control[]",
+                series,
+            )
+
+    outputs = get_ds(ulog, "actuator_outputs")
+    if outputs is None:
+        return None
+    count = 16
+    if "noutputs" in outputs.data:
+        finite_counts = np.asarray(outputs.data["noutputs"], dtype=float)
+        finite_counts = finite_counts[np.isfinite(finite_counts)]
+        if finite_counts.size:
+            count = min(int(np.nanmax(finite_counts)), count)
+
+    t = t_rel(outputs, base_timestamp)
+    series = []
+    for index in range(count):
+        field = f"output[{index}]"
+        if field not in outputs.data:
+            break
+        values = finite_signal(outputs.data[field])
+        if has_nonconstant_signal(values):
+            series.append(SignalSeries(f"Output {index}", t, values))
+
+    if not series:
+        return None
+    return ActuatorOutputSet(
+        "Actuator outputs",
+        "output",
+        "actuator_outputs.output[]",
+        series,
+    )
+
+
+def get_esc_rpm_series(ulog: ULog, base_timestamp: int) -> list[SignalSeries]:
+    esc = get_ds(ulog, "esc_status")
+    if esc is None:
+        return []
+
+    fields: list[tuple[int, str]] = []
+    if "esc_count" in esc.data:
+        count_values = np.asarray(esc.data["esc_count"], dtype=float)
+        finite_counts = count_values[np.isfinite(count_values)]
+        esc_count = int(np.nanmax(finite_counts)) if finite_counts.size else 0
+        fields = [(index, f"esc[{index}].esc_rpm") for index in range(esc_count)]
+    else:
+        for field in sorted(esc.data):
+            if field.startswith("esc[") and field.endswith("].esc_rpm"):
+                try:
+                    index = int(field.split("[", 1)[1].split("]", 1)[0])
+                except (IndexError, ValueError):
+                    continue
+                fields.append((index, field))
+
+    t = t_rel(esc, base_timestamp)
+    series: list[SignalSeries] = []
+    for index, field in fields:
+        if field not in esc.data:
+            continue
+        rpm = finite_signal(esc.data[field])
+        finite = rpm[np.isfinite(rpm)]
+        if finite.size:
+            series.append(SignalSeries(f"ESC {index + 1} RPM", t, rpm))
+    return series
+
+
+def actuator_saturation_label(value: int) -> str:
+    return _ACTUATOR_SATURATION_LABELS.get(int(value), f"unknown ({int(value)})")
+
+
+def get_actuator_saturation_series(ulog: ULog, base_timestamp: int) -> list[SignalSeries]:
+    status_sets = get_all_ds(ulog, "control_allocator_status")
+    if not status_sets:
+        return []
+
+    series: list[SignalSeries] = []
+    include_instance = len(status_sets) > 1
+    for status in status_sets:
+        t = t_rel(status, base_timestamp)
+        multi_id = getattr(status, "multi_id", 0)
+        prefix = f"control_allocator_status[{multi_id}]." if include_instance else ""
+
+        for index in range(16):
+            field = f"actuator_saturation[{index}]"
+            if field not in status.data:
+                continue
+            values = finite_signal(status.data[field])
+            finite = values[np.isfinite(values)]
+            if finite.size:
+                series.append(SignalSeries(f"{prefix}{field}", t, values))
+
+    return series
+
+
+def setup_actuator_saturation_axis(ax, title: str):
+    setup_axis(ax, title, "state")
+    ticks = sorted(_ACTUATOR_SATURATION_LABELS)
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([_ACTUATOR_SATURATION_LABELS[tick] for tick in ticks], fontsize=6)
+    ax.set_ylim(min(ticks) - 0.35, max(ticks) + 0.35)
 
 
 def get_range(ulog: ULog, base_timestamp: int) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1159,8 +2177,8 @@ def compute_baro_range_divergence(
     """Return (t_baro, baro_alt_m, aligned_divergence, offset).
 
     divergence = (baro_alt - range_agl_interpolated) - median_offset_at_start
-    Uses distance_sensor as AGL truth. The offset absorbs the MSL-to-AGL
-    reference difference so only dynamic baro error relative to the laser is shown.
+    Uses distance_sensor as the AGL reference. The offset absorbs the MSL-to-AGL
+    reference difference so only dynamic baro error relative to the rangefinder is shown.
     Returns None when rangefinder data is unavailable.
     """
     range_result = get_range(ulog, base_timestamp)
@@ -1190,7 +2208,7 @@ def compute_baro_gps_divergence(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float] | None:
     """Return baro divergence against GPS altitude as a legacy fallback.
 
-    Rangefinder data is the preferred altitude truth source. GPS altitude is only
+    Rangefinder data is the preferred altitude reference source. GPS altitude is only
     useful as a rough diagnostic fallback and is not used for propwash scoring.
     """
     air = get_ds(ulog, "vehicle_air_data")
@@ -1222,7 +2240,7 @@ def detect_propwash_events(
     """Return (t, propwash_mask, divergence) on the baro time axis.
 
     propwash = |aligned_divergence| > threshold AND thrust > threshold.
-    Requires rangefinder-based divergence. GPS altitude is not used as truth.
+    Requires rangefinder-based divergence. GPS altitude is not used for scoring.
     """
     result = compute_baro_range_divergence(ulog, base_timestamp)
     if result is None:
@@ -1238,7 +2256,9 @@ def detect_propwash_events(
     else:
         throttle_mask = np.ones(len(t_baro), dtype=bool)
 
-    propwash = (np.abs(divergence) > divergence_threshold_m) & throttle_mask & np.isfinite(divergence)
+    propwash = (
+        (np.abs(divergence) > divergence_threshold_m) & throttle_mask & np.isfinite(divergence)
+    )
     return t_baro, propwash, divergence
 
 
@@ -1268,14 +2288,47 @@ def compute_tilt_deg(ulog: ULog, base_timestamp: int) -> tuple[np.ndarray, np.nd
     return t, np.degrees(np.arccos(cos_tilt))
 
 
-def plot_position_overview(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def quaternion_to_euler_deg(
+    ds, prefix: str = "q"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    fields = [f"{prefix}[{index}]" for index in range(4)]
+    if any(field not in ds.data for field in fields):
+        return None
+
+    qw, qx, qy, qz = [arr(ds, field) for field in fields]
+    norm = np.sqrt(qw**2 + qx**2 + qy**2 + qz**2)
+    norm = np.where(norm > 1e-12, norm, np.nan)
+    qw = qw / norm
+    qx = qx / norm
+    qy = qy / norm
+    qz = qz / norm
+
+    roll = np.arctan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx**2 + qy**2))
+    pitch = np.arcsin(np.clip(2.0 * (qw * qy - qz * qx), -1.0, 1.0))
+    yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy**2 + qz**2))
+    return np.degrees(roll), np.degrees(pitch), np.degrees(np.unwrap(yaw))
+
+
+def attitude_setpoint_euler_deg(ds) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    if all(field in ds.data for field in ("roll_body", "pitch_body", "yaw_body")):
+        return (
+            np.degrees(arr(ds, "roll_body")),
+            np.degrees(arr(ds, "pitch_body")),
+            np.degrees(np.unwrap(arr(ds, "yaw_body"))),
+        )
+    return quaternion_to_euler_deg(ds, prefix="q_d")
+
+
+def plot_position_overview(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     """Altitude overview using EKF local-z, baro, optional rangefinder, and GPS."""
     air = get_ds(ulog, "vehicle_air_data")
     lpos = get_ds(ulog, "vehicle_local_position")
     gps = get_ds(ulog, "vehicle_gps_position")
     range_result = get_range(ulog, base_timestamp)
 
-    fig, axes = plt.subplots(3, 1, figsize=(10.5, 7.0), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(10.5, 8.8), sharex=True)
 
     # Panel 1: AGL altitude comparison
     if lpos:
@@ -1293,14 +2346,21 @@ def plot_position_overview(ulog: ULog, base_timestamp: int, fig_dir: Path, shade
             baro_i = interp_at(t_r, r_m, ta)
             early = (ta >= 0) & (ta <= 30.0) & np.isfinite(baro_i)
             offset = float(np.median(baro_agl[early] - baro_i[early])) if early.sum() > 0 else 0.0
-            axes[0].plot(ta, baro_agl - offset, label="Baro (aligned to rangefinder)", lw=1.0,
-                         color="tab:orange", alpha=0.8)
+            axes[0].plot(
+                ta,
+                baro_agl - offset,
+                label="Baro (aligned to rangefinder)",
+                lw=1.0,
+                color="tab:orange",
+                alpha=0.8,
+            )
         else:
             axes[0].plot(ta, baro_agl, label="Baro MSL", lw=1.0, color="tab:orange", alpha=0.8)
     if gps:
         tg = t_rel(gps, base_timestamp)
-        axes[0].plot(tg, gps_alt_m(gps), label="GPS MSL (ref only)", lw=0.8,
-                     color="gray", ls=":", alpha=0.5)
+        axes[0].plot(
+            tg, gps_alt_m(gps), label="GPS MSL (ref only)", lw=0.8, color="gray", ls=":", alpha=0.5
+        )
     altitude_title = (
         "Altitude — EKF, rangefinder, baro (GPS shown for reference only)"
         if range_result is not None
@@ -1321,16 +2381,98 @@ def plot_position_overview(ulog: ULog, base_timestamp: int, fig_dir: Path, shade
         axes[2].plot(tl, arr(lpos, "x"), label="local x", lw=0.9)
         axes[2].plot(tl, arr(lpos, "y"), label="local y", lw=0.9)
     setup_axis(axes[2], "Local horizontal position", "m")
-    axes[2].set_xlabel("flight-log relative time [s]")
+
+    # Panel 4: terrain/HAGL estimator states
+    terrain_hagl_series = terrain_hagl_state_series(ulog, base_timestamp)
+    for series in terrain_hagl_series:
+        axes[3].plot(series.t, series.values, label=series.label, lw=1.0, alpha=0.85)
+    if not terrain_hagl_series:
+        plot_unavailable(
+            axes[3], "vehicle_local_position.dist_bottom / vehicle_global_position terrain not logged"
+        )
+    setup_axis(axes[3], "Terrain and HAGL state comparison", "m")
+    axes[3].set_xlabel("flight-log relative time [s]")
     shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
 
     for ax in axes:
-        ax.legend(loc="best", fontsize=8)
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=8)
 
     return save_fig(fig, fig_dir, "position_overview")
 
 
-def plot_local_xy_position(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def terrain_hagl_state_series(ulog: ULog, base_timestamp: int) -> list[SignalSeries]:
+    """Return terrain and HAGL states in log-relative metres when available."""
+    lpos = get_ds(ulog, "vehicle_local_position")
+    gpos = get_ds(ulog, "vehicle_global_position")
+    estimator_states = get_ds(ulog, "estimator_states")
+    series: list[SignalSeries] = []
+
+    if estimator_states is not None and "states[24]" in estimator_states.data:
+        series.append(
+            SignalSeries(
+                "terrain state: estimator_states.states[24] (_state.terrain)",
+                t_rel(estimator_states, base_timestamp),
+                arr(estimator_states, "states[24]"),
+            )
+        )
+
+    if lpos is not None and "dist_bottom" in lpos.data:
+        t = t_rel(lpos, base_timestamp)
+        dist_bottom = arr(lpos, "dist_bottom")
+        series.append(SignalSeries("HAGL: vehicle_local_position.dist_bottom", t, dist_bottom))
+
+        if "z" in lpos.data:
+            series.append(
+                SignalSeries(
+                    "terrain local NED: z + dist_bottom",
+                    t,
+                    arr(lpos, "z") + dist_bottom,
+                )
+            )
+
+    if gpos is None:
+        return series
+
+    tg = t_rel(gpos, base_timestamp)
+    terrain_alt = None
+    if "terrain_alt" in gpos.data:
+        terrain_alt = arr(gpos, "terrain_alt")
+        if "terrain_alt_valid" in gpos.data:
+            terrain_alt = np.where(
+                arr(gpos, "terrain_alt_valid", int).astype(bool), terrain_alt, np.nan
+            )
+
+        finite = np.isfinite(terrain_alt)
+        if finite.any():
+            terrain_ref = float(terrain_alt[finite][0])
+            series.append(
+                SignalSeries(
+                    "terrain global NED rel start: -delta terrain_alt",
+                    tg,
+                    terrain_ref - terrain_alt,
+                )
+            )
+
+    if terrain_alt is not None and "alt" in gpos.data:
+        alt = arr(gpos, "alt")
+        if "alt_valid" in gpos.data:
+            alt = np.where(arr(gpos, "alt_valid", int).astype(bool), alt, np.nan)
+        series.append(
+            SignalSeries(
+                "HAGL: vehicle_global_position.alt - terrain_alt",
+                tg,
+                alt - terrain_alt,
+            )
+        )
+
+    return series
+
+
+def plot_local_xy_position(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     """Local horizontal EKF position: XY track plus x(t) and y(t)."""
     lpos = get_ds(ulog, "vehicle_local_position")
     fig, axes = plt.subplots(
@@ -1349,16 +2491,26 @@ def plot_local_xy_position(ulog: ULog, base_timestamp: int, fig_dir: Path, shade
         finite_xy = np.isfinite(x) & np.isfinite(y)
         if finite_xy.any():
             axes[0].plot(y[finite_xy], x[finite_xy], lw=1.0, color="tab:blue", label="local XY")
-            axes[0].scatter(y[finite_xy][0], x[finite_xy][0], s=28, color="tab:green", label="start", zorder=3)
-            axes[0].scatter(y[finite_xy][-1], x[finite_xy][-1], s=28, color="tab:red", label="end", zorder=3)
+            axes[0].scatter(
+                y[finite_xy][0], x[finite_xy][0], s=28, color="tab:green", label="start", zorder=3
+            )
+            axes[0].scatter(
+                y[finite_xy][-1], x[finite_xy][-1], s=28, color="tab:red", label="end", zorder=3
+            )
             axes[0].set_aspect("equal", adjustable="box")
 
         axes[1].plot(t, x, lw=0.9, color="tab:blue", label="local x")
         axes[2].plot(t, y, lw=0.9, color="tab:orange", label="local y")
     else:
         for ax in axes:
-            ax.text(0.5, 0.5, "vehicle_local_position x/y not logged", ha="center", va="center",
-                    transform=ax.transAxes)
+            ax.text(
+                0.5,
+                0.5,
+                "vehicle_local_position x/y not logged",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
 
     setup_axis(axes[0], "Local XY position", "x [m]")
     axes[0].set_xlabel("y [m]")
@@ -1375,7 +2527,9 @@ def plot_local_xy_position(ulog: ULog, base_timestamp: int, fig_dir: Path, shade
     return save_fig(fig, fig_dir, "local_xy_position")
 
 
-def plot_nav_state_timeline(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_nav_state_timeline(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     """Plot vehicle_status.nav_state using PX4 enum labels for observed states."""
     status = get_ds(ulog, "vehicle_status")
     fig, ax = plt.subplots(figsize=(10.5, 4.2), constrained_layout=True)
@@ -1392,9 +2546,7 @@ def plot_nav_state_timeline(ulog: ULog, base_timestamp: int, fig_dir: Path, shad
         setup_axis(ax, "Flight mode timeline", "nav_state")
         ax.set_xlabel("flight-log relative time [s]")
         shade_mode_background(ax, ulog, base_timestamp, enabled=shade_modes)
-        if not add_system_time_axis(ax, ulog, base_timestamp):
-            ax.text(0.01, 0.97, "UTC system time unavailable", transform=ax.transAxes,
-                    fontsize=8, color="tab:red", va="top")
+        add_system_time_axis(ax, ulog, base_timestamp)
         return save_fig(fig, fig_dir, "nav_state_timeline")
 
     t = t_rel(status, base_timestamp)
@@ -1424,9 +2576,7 @@ def plot_nav_state_timeline(ulog: ULog, base_timestamp: int, fig_dir: Path, shad
     ]
     if mode_handles:
         ax.legend(handles=mode_handles, loc="best", fontsize=7, title="Observed mode colors")
-    if not add_system_time_axis(ax, ulog, base_timestamp):
-        ax.text(0.01, 0.97, "UTC system time unavailable", transform=ax.transAxes,
-                fontsize=8, color="tab:red", va="top")
+    add_system_time_axis(ax, ulog, base_timestamp)
 
     return save_fig(fig, fig_dir, "nav_state_timeline")
 
@@ -1450,8 +2600,14 @@ def plot_tracking_components(
 
     if lpos is None:
         for ax in axes:
-            ax.text(0.5, 0.5, "vehicle_local_position not logged", ha="center", va="center",
-                    transform=ax.transAxes)
+            ax.text(
+                0.5,
+                0.5,
+                "vehicle_local_position not logged",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
         for idx, (field, label) in enumerate(zip(fields, axis_labels)):
             setup_axis(axes[idx], f"{quantity_label} {label}", f"{field} [{units_label}]")
             setup_axis(axes[idx + 3], f"{quantity_label} {label} delta", units_label)
@@ -1464,7 +2620,9 @@ def plot_tracking_components(
     colors = ["tab:blue", "tab:green", "tab:purple"]
     setpoint_colors = ["tab:orange", "tab:red", "tab:brown"]
 
-    for idx, (field, label, color, sp_color) in enumerate(zip(fields, axis_labels, colors, setpoint_colors)):
+    for idx, (field, label, color, sp_color) in enumerate(
+        zip(fields, axis_labels, colors, setpoint_colors)
+    ):
         estimate = arr(lpos, field) if field in lpos.data else None
         setpoint = arr(sp, field) if sp is not None and field in sp.data else None
         ax_value = axes[idx]
@@ -1473,22 +2631,42 @@ def plot_tracking_components(
         if estimate is not None:
             ax_value.plot(t, estimate, lw=1.0, color=color, label=f"{field} estimate")
         else:
-            ax_value.text(0.5, 0.5, f"vehicle_local_position.{field} not logged",
-                          ha="center", va="center", transform=ax_value.transAxes)
+            ax_value.text(
+                0.5,
+                0.5,
+                f"vehicle_local_position.{field} not logged",
+                ha="center",
+                va="center",
+                transform=ax_value.transAxes,
+            )
 
         if setpoint is not None and tsp is not None:
-            ax_value.step(tsp, setpoint, where="post", lw=1.0, color=sp_color, label=f"{field} setpoint")
+            ax_value.step(
+                tsp, setpoint, where="post", lw=1.0, color=sp_color, label=f"{field} setpoint"
+            )
         elif setpoint_missing:
-            ax_value.text(0.01, 0.90, "vehicle_local_position_setpoint not logged",
-                          transform=ax_value.transAxes, fontsize=8, color="tab:red")
+            ax_value.text(
+                0.01,
+                0.90,
+                "vehicle_local_position_setpoint not logged",
+                transform=ax_value.transAxes,
+                fontsize=8,
+                color="tab:red",
+            )
 
         if estimate is not None and setpoint is not None and tsp is not None:
             delta = estimate - interp_step_previous(tsp, setpoint, t)
             ax_delta.plot(t, delta, lw=0.9, color=color, label=f"{field} estimate - setpoint")
             ax_delta.axhline(0.0, color="gray", lw=0.7, ls=":")
         else:
-            ax_delta.text(0.5, 0.5, f"{field} delta unavailable", ha="center", va="center",
-                          transform=ax_delta.transAxes)
+            ax_delta.text(
+                0.5,
+                0.5,
+                f"{field} delta unavailable",
+                ha="center",
+                va="center",
+                transform=ax_delta.transAxes,
+            )
         setup_axis(ax_value, f"{quantity_label} {label}", f"{field} [{units_label}]")
         setup_axis(ax_delta, f"{quantity_label} {label} delta (estimate - setpoint)", units_label)
 
@@ -1504,7 +2682,9 @@ def plot_tracking_components(
     return save_fig(fig, fig_dir, output_name)
 
 
-def plot_position_tracking(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_position_tracking(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     return plot_tracking_components(
         ulog,
         base_timestamp,
@@ -1518,7 +2698,9 @@ def plot_position_tracking(ulog: ULog, base_timestamp: int, fig_dir: Path, shade
     )
 
 
-def plot_velocity_tracking(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_velocity_tracking(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     return plot_tracking_components(
         ulog,
         base_timestamp,
@@ -1532,7 +2714,335 @@ def plot_velocity_tracking(ulog: ULog, base_timestamp: int, fig_dir: Path, shade
     )
 
 
-def plot_manual_control_inputs(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def finish_px4_setpoint_axes(
+    axes: np.ndarray, ulog: ULog, base_timestamp: int, shade_modes: bool = True
+):
+    axes[-1].set_xlabel("flight-log relative time [s]")
+    spans = nav_state_spans(ulog, base_timestamp)
+    if spans:
+        for ax in axes:
+            ax.set_xlim(spans[0].start_s, spans[-1].end_s)
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes, alpha=0.12)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+
+
+def plot_px4_setpoint_commands(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    trajectory = get_ds(ulog, "trajectory_setpoint")
+    offboard = get_ds(ulog, "offboard_control_mode")
+    lpos_sp = get_ds(ulog, "vehicle_local_position_setpoint")
+
+    fig, axes = plt.subplots(
+        5,
+        1,
+        figsize=(10.5, 12.0),
+        sharex=True,
+        constrained_layout=True,
+        gridspec_kw={"height_ratios": [2.2, 1.35, 1.7, 2.2, 1.35]},
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    colors = [
+        "tab:blue",
+        "tab:orange",
+        "tab:red",
+        "tab:green",
+        "tab:purple",
+        "tab:brown",
+        "tab:pink",
+    ]
+
+    if trajectory is not None:
+        t_traj = t_rel(trajectory, base_timestamp)
+        for index, color in enumerate(colors):
+            field = f"velocity[{index}]"
+            if field in trajectory.data:
+                axes[0].plot(
+                    t_traj,
+                    arr(trajectory, field),
+                    lw=0.9,
+                    color=color,
+                    label=f"trajectory_setpoint.{field}",
+                )
+        for index, color in enumerate(colors):
+            field = f"position[{index}]"
+            if field in trajectory.data:
+                axes[1].step(
+                    t_traj,
+                    arr(trajectory, field),
+                    where="post",
+                    lw=0.9,
+                    color=color,
+                    label=f"trajectory_setpoint.{field}",
+                )
+    if not axes[0].has_data():
+        plot_unavailable(axes[0], "trajectory_setpoint.velocity[] not logged")
+    axes[0].axhline(0.0, color="gray", lw=0.7, ls=":")
+    setup_axis(axes[0], "Trajectory setpoint velocity", "m/s")
+    if not axes[1].has_data():
+        plot_unavailable(axes[1], "trajectory_setpoint.position[] not logged")
+    setup_axis(axes[1], "Trajectory setpoint position", "m")
+
+    if offboard is not None:
+        t_offboard = t_rel(offboard, base_timestamp)
+        fields = [
+            "position",
+            "velocity",
+            "acceleration",
+            "attitude",
+            "body_rate",
+            "thrust_and_torque",
+            "direct_actuator",
+        ]
+        series = [
+            (field, t_offboard, arr(offboard, field, int), colors[index % len(colors)])
+            for index, field in enumerate(fields)
+            if field in offboard.data
+        ]
+        plot_boolean_group_sources(axes[2], series, "Offboard control mode")
+    else:
+        plot_unavailable(axes[2], "offboard_control_mode not logged")
+        setup_boolean_axis(axes[2], "Offboard control mode")
+
+    if lpos_sp is not None:
+        t_lpos_sp = t_rel(lpos_sp, base_timestamp)
+        for field, color in [("vx", "tab:blue"), ("vy", "tab:orange"), ("vz", "tab:red")]:
+            if field in lpos_sp.data:
+                axes[3].step(
+                    t_lpos_sp,
+                    arr(lpos_sp, field),
+                    where="post",
+                    lw=0.9,
+                    color=color,
+                    label=f"vehicle_local_position_setpoint.{field}",
+                )
+        for field, color in [("x", "tab:blue"), ("y", "tab:orange"), ("z", "tab:red")]:
+            if field in lpos_sp.data:
+                axes[4].step(
+                    t_lpos_sp,
+                    arr(lpos_sp, field),
+                    where="post",
+                    lw=0.9,
+                    color=color,
+                    label=f"vehicle_local_position_setpoint.{field}",
+                )
+    if not axes[3].has_data():
+        plot_unavailable(axes[3], "vehicle_local_position_setpoint.vx/vy/vz not logged")
+    axes[3].axhline(0.0, color="gray", lw=0.7, ls=":")
+    setup_axis(axes[3], "Vehicle local position setpoint velocity", "m/s")
+    if not axes[4].has_data():
+        plot_unavailable(axes[4], "vehicle_local_position_setpoint.x/y/z not logged")
+    setup_axis(axes[4], "Vehicle local position setpoint position", "m")
+
+    finish_px4_setpoint_axes(axes, ulog, base_timestamp, shade_modes=shade_modes)
+    return save_fig(fig, fig_dir, "px4_setpoint_commands")
+
+
+def plot_px4_setpoint_response(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    trajectory = get_ds(ulog, "trajectory_setpoint")
+    lpos_sp = get_ds(ulog, "vehicle_local_position_setpoint")
+    lpos = get_ds(ulog, "vehicle_local_position")
+    dist = get_ds(ulog, "distance_sensor")
+    estimator_states = get_ds(ulog, "estimator_states")
+    attitude_sp = get_ds(ulog, "vehicle_attitude_setpoint")
+
+    fig, axes = plt.subplots(
+        6,
+        1,
+        figsize=(10.5, 13.2),
+        sharex=True,
+        constrained_layout=True,
+        gridspec_kw={"height_ratios": [1.5, 2.2, 1.7, 1.25, 1.35, 1.35]},
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    colors = [
+        "tab:blue",
+        "tab:orange",
+        "tab:red",
+        "tab:green",
+        "tab:purple",
+        "tab:brown",
+        "tab:pink",
+    ]
+
+    if lpos is not None:
+        t_lpos = t_rel(lpos, base_timestamp)
+        if "z" in lpos.data:
+            axes[0].plot(
+                t_lpos,
+                arr(lpos, "z"),
+                lw=0.9,
+                color="tab:blue",
+                label="vehicle_local_position.z",
+            )
+        if "vz" in lpos.data:
+            axes[1].plot(
+                t_lpos,
+                arr(lpos, "vz"),
+                lw=0.9,
+                color="tab:blue",
+                label="vehicle_local_position.vz",
+            )
+        if "z_deriv" in lpos.data:
+            axes[1].plot(
+                t_lpos,
+                arr(lpos, "z_deriv"),
+                lw=0.9,
+                color="tab:green",
+                label="vehicle_local_position.z_deriv",
+            )
+        if "dist_bottom" in lpos.data:
+            axes[2].plot(
+                t_lpos,
+                arr(lpos, "dist_bottom"),
+                lw=0.9,
+                color="tab:orange",
+                label="vehicle_local_position.dist_bottom",
+            )
+        if "z" in lpos.data and "dist_bottom" in lpos.data:
+            axes[2].plot(
+                t_lpos,
+                arr(lpos, "z") + arr(lpos, "dist_bottom"),
+                lw=0.9,
+                color="tab:blue",
+                label="vehicle_local_position.z + dist_bottom",
+            )
+        reset_fields = [
+            "xy_reset_counter",
+            "z_reset_counter",
+            "vxy_reset_counter",
+            "vz_reset_counter",
+            "heading_reset_counter",
+            "dist_bottom_reset_counter",
+        ]
+        for index, field in enumerate(reset_fields):
+            if field in lpos.data:
+                axes[3].step(
+                    t_lpos,
+                    arr(lpos, field, int),
+                    where="post",
+                    lw=0.8,
+                    color=colors[index % len(colors)],
+                    label=f"vehicle_local_position.{field}",
+                )
+    if lpos_sp is not None:
+        t_lpos_sp = t_rel(lpos_sp, base_timestamp)
+        if "z" in lpos_sp.data:
+            axes[0].step(
+                t_lpos_sp,
+                arr(lpos_sp, "z"),
+                where="post",
+                lw=0.9,
+                color="tab:red",
+                label="vehicle_local_position_setpoint.z",
+            )
+        if "vz" in lpos_sp.data:
+            axes[1].step(
+                t_lpos_sp,
+                arr(lpos_sp, "vz"),
+                where="post",
+                lw=0.9,
+                color="tab:red",
+                label="vehicle_local_position_setpoint.vz",
+            )
+    if trajectory is not None and "velocity[2]" in trajectory.data:
+        axes[1].step(
+            t_rel(trajectory, base_timestamp),
+            arr(trajectory, "velocity[2]"),
+            where="post",
+            lw=0.9,
+            ls="--",
+            color="tab:purple",
+            label="trajectory_setpoint.velocity[2]",
+        )
+    if dist is not None and "current_distance" in dist.data:
+        axes[2].plot(
+            t_rel(dist, base_timestamp),
+            arr(dist, "current_distance"),
+            lw=0.8,
+            color="tab:red",
+            label="distance_sensor.current_distance",
+        )
+    if estimator_states is not None and "states[24]" in estimator_states.data:
+        axes[2].step(
+            t_rel(estimator_states, base_timestamp),
+            arr(estimator_states, "states[24]"),
+            where="post",
+            lw=0.9,
+            ls="--",
+            color="tab:purple",
+            label="estimator_states.states[24] (_state.terrain)",
+        )
+    if not axes[0].has_data():
+        plot_unavailable(axes[0], "vehicle_local_position.z not logged")
+    setup_axis(axes[0], "Vertical position and setpoint (NED z)", "m")
+    if not axes[1].has_data():
+        plot_unavailable(axes[1], "vehicle_local_position.vz not logged")
+    axes[1].axhline(0.0, color="gray", lw=0.7, ls=":")
+    setup_axis(axes[1], "Vertical velocity state and setpoints (NED vz)", "m/s")
+    if not axes[2].has_data():
+        plot_unavailable(axes[2], "range/HAGL/terrain fields not logged")
+    axes[2].axhline(0.0, color="gray", lw=0.7, ls=":")
+    setup_axis(axes[2], "Range height and terrain vertical state", "m")
+    if not axes[3].has_data():
+        plot_unavailable(axes[3], "vehicle_local_position reset counters not logged")
+    setup_axis(axes[3], "Vehicle local position reset counters", "count")
+    setup_integer_value_axis(
+        axes[3],
+        np.concatenate([np.asarray(line.get_ydata()) for line in axes[3].lines])
+        if axes[3].lines
+        else np.array([]),
+    )
+
+    sp_euler = attitude_setpoint_euler_deg(attitude_sp) if attitude_sp is not None else None
+    if attitude_sp is not None:
+        t_att_sp = t_rel(attitude_sp, base_timestamp)
+        if sp_euler is not None:
+            for index, (label, color) in enumerate(
+                [("roll", "tab:blue"), ("pitch", "tab:orange"), ("yaw", "tab:red")]
+            ):
+                axes[4].step(
+                    t_att_sp,
+                    sp_euler[index],
+                    where="post",
+                    lw=0.9,
+                    color=color,
+                    label=f"vehicle_attitude_setpoint {label}",
+                )
+    if not axes[4].has_data():
+        plot_unavailable(axes[4], "vehicle_attitude_setpoint.q_d[] not logged")
+    setup_axis(axes[4], "Vehicle attitude setpoint Euler angles", "deg")
+
+    if attitude_sp is not None:
+        t_att_sp = t_rel(attitude_sp, base_timestamp)
+        for index, color in enumerate(colors[:3]):
+            field = f"thrust_body[{index}]"
+            if field in attitude_sp.data:
+                axes[5].step(
+                    t_att_sp,
+                    arr(attitude_sp, field),
+                    where="post",
+                    lw=0.9,
+                    color=color,
+                    label=f"vehicle_attitude_setpoint.{field}",
+                )
+    if not axes[5].has_data():
+        plot_unavailable(axes[5], "vehicle_attitude_setpoint.thrust_body[] not logged")
+    setup_axis(axes[5], "Vehicle attitude setpoint thrust body", "normalized")
+
+    finish_px4_setpoint_axes(axes, ulog, base_timestamp, shade_modes=shade_modes)
+    return save_fig(fig, fig_dir, "px4_setpoint_response")
+
+
+def plot_manual_control_inputs(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     manual = get_ds(ulog, "manual_control_setpoint")
     controls = [
         ("roll", "Roll input"),
@@ -1565,8 +3075,14 @@ def plot_manual_control_inputs(ulog: ULog, base_timestamp: int, fig_dir: Path, s
     axes = np.ravel(np.atleast_1d(axes))
 
     if manual is None:
-        axes[0].text(0.5, 0.5, "manual_control_setpoint not logged", ha="center", va="center",
-                     transform=axes[0].transAxes)
+        axes[0].text(
+            0.5,
+            0.5,
+            "manual_control_setpoint not logged",
+            ha="center",
+            va="center",
+            transform=axes[0].transAxes,
+        )
         setup_axis(axes[0], "Manual Control Inputs unavailable", "input")
         axes[0].set_xlabel("flight-log relative time [s]")
         shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
@@ -1594,8 +3110,14 @@ def plot_manual_control_inputs(ulog: ULog, base_timestamp: int, fig_dir: Path, s
         axis_idx += 1
 
     if axis_idx == 0:
-        axes[0].text(0.5, 0.5, "manual_control_setpoint input fields not logged",
-                     ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].text(
+            0.5,
+            0.5,
+            "manual_control_setpoint input fields not logged",
+            ha="center",
+            va="center",
+            transform=axes[0].transAxes,
+        )
         setup_axis(axes[0], "Manual Control Inputs unavailable", "input")
 
     axes[-1].set_xlabel("flight-log relative time [s]")
@@ -1604,19 +3126,209 @@ def plot_manual_control_inputs(ulog: ULog, base_timestamp: int, fig_dir: Path, s
     return save_fig(fig, fig_dir, "manual_control_inputs")
 
 
-def plot_terrain_estimate(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
-    """Plot published terrain/HAGL estimate from vehicle_local_position."""
+def plot_attitude_overview(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    attitude = get_ds(ulog, "vehicle_attitude")
+    attitude_sp = get_ds(ulog, "vehicle_attitude_setpoint")
+    angular_velocity = get_ds(ulog, "vehicle_angular_velocity")
     lpos = get_ds(ulog, "vehicle_local_position")
-    flags = get_ds(ulog, "estimator_status_flags")
-    gpos = get_ds(ulog, "vehicle_global_position")
+
     fig, axes = plt.subplots(
         5,
         1,
-        figsize=(10.5, 7.4),
+        figsize=(10.5, 9.2),
+        sharex=True,
+        constrained_layout=True,
+    )
+
+    euler = quaternion_to_euler_deg(attitude) if attitude is not None else None
+    t_att = t_rel(attitude, base_timestamp) if attitude is not None else None
+    sp_euler = attitude_setpoint_euler_deg(attitude_sp) if attitude_sp is not None else None
+    t_sp = t_rel(attitude_sp, base_timestamp) if attitude_sp is not None else None
+    labels = [("Roll", "tab:blue"), ("Pitch", "tab:green"), ("Yaw", "tab:purple")]
+    for index, (label, color) in enumerate(labels):
+        ax = axes[index]
+        if euler is not None and t_att is not None:
+            ax.plot(t_att, euler[index], lw=0.9, color=color, label=f"{label.lower()} estimate")
+        if sp_euler is not None and t_sp is not None:
+            ax.step(
+                t_sp,
+                sp_euler[index],
+                where="post",
+                lw=0.9,
+                ls="--",
+                color="tab:orange",
+                label=f"{label.lower()} setpoint",
+            )
+        if not ax.has_data():
+            plot_unavailable(ax, f"{label.lower()} attitude not logged")
+        setup_axis(ax, f"Attitude {label}", "deg")
+
+    if angular_velocity is not None:
+        t_rate = t_rel(angular_velocity, base_timestamp)
+        for index, (label, color) in enumerate(
+            [("roll rate", "tab:blue"), ("pitch rate", "tab:green"), ("yaw rate", "tab:purple")]
+        ):
+            field = f"xyz[{index}]"
+            if field in angular_velocity.data:
+                axes[3].plot(
+                    t_rate,
+                    np.degrees(arr(angular_velocity, field)),
+                    lw=0.8,
+                    color=color,
+                    label=label,
+                )
+    if not axes[3].has_data():
+        plot_unavailable(axes[3], "vehicle_angular_velocity.xyz[] not logged")
+    setup_axis(axes[3], "Body angular velocity", "deg/s")
+
+    if lpos is not None:
+        t_lpos = t_rel(lpos, base_timestamp)
+        plotted_motion = False
+        if all(field in lpos.data for field in ("vx", "vy")):
+            h_speed = np.sqrt(arr(lpos, "vx") ** 2 + arr(lpos, "vy") ** 2)
+            axes[4].plot(t_lpos, h_speed, lw=0.9, color="tab:blue", label="horizontal speed")
+            plotted_motion = True
+        if all(field in lpos.data for field in ("ax", "ay")):
+            h_accel = np.sqrt(arr(lpos, "ax") ** 2 + arr(lpos, "ay") ** 2)
+            axes[4].plot(t_lpos, h_accel, lw=0.9, color="tab:red", label="horizontal acceleration")
+            plotted_motion = True
+        if not plotted_motion:
+            plot_unavailable(axes[4], "vehicle_local_position horizontal motion fields not logged")
+    else:
+        plot_unavailable(axes[4], "vehicle_local_position not logged")
+    setup_axis(axes[4], "Horizontal motion context", "m/s or m/s^2")
+
+    axes[-1].set_xlabel("flight-log relative time [s]")
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "attitude_overview")
+
+
+def plot_actuator_outputs(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    outputs = get_motor_output_set(ulog, base_timestamp)
+    saturation_series = get_actuator_saturation_series(ulog, base_timestamp)
+    thrust_result = get_thrust(ulog, base_timestamp)
+    rpm_series = get_esc_rpm_series(ulog, base_timestamp)
+
+    fig, axes = plt.subplots(
+        4,
+        1,
+        figsize=(10.5, 8.4),
+        sharex=True,
+        constrained_layout=True,
+    )
+
+    colors = [
+        "tab:blue",
+        "tab:orange",
+        "tab:green",
+        "tab:red",
+        "tab:purple",
+        "tab:brown",
+        "tab:pink",
+        "tab:gray",
+    ]
+
+    if outputs is not None:
+        for index, signal in enumerate(outputs.series):
+            count = min(signal.t.size, signal.values.size)
+            if count:
+                axes[0].plot(
+                    signal.t[:count],
+                    signal.values[:count],
+                    lw=0.75,
+                    color=colors[index % len(colors)],
+                    label=signal.label,
+                )
+        if outputs.ylabel == "normalized":
+            axes[0].set_ylim(-1.05, 1.05)
+        setup_axis(axes[0], outputs.title, outputs.ylabel)
+    else:
+        plot_unavailable(axes[0], "actuator_motors or varying actuator_outputs not logged")
+        setup_axis(axes[0], "Motor / actuator outputs unavailable", "output")
+
+    if saturation_series:
+        for index, signal in enumerate(saturation_series):
+            count = min(signal.t.size, signal.values.size)
+            if count:
+                axes[1].step(
+                    signal.t[:count],
+                    signal.values[:count],
+                    where="post",
+                    lw=0.75,
+                    color=colors[index % len(colors)],
+                    label=signal.label,
+                )
+    else:
+        plot_unavailable(
+            axes[1], "control_allocator_status.actuator_saturation[] not logged"
+        )
+    setup_actuator_saturation_axis(
+        axes[1], "Actuator saturation state (control_allocator_status)"
+    )
+
+    if thrust_result is not None:
+        t_thr, thrust = thrust_result
+        axes[2].plot(t_thr, thrust, lw=0.9, color="tab:brown", label="thrust")
+        finite = thrust[np.isfinite(thrust)]
+        if finite.size and np.nanmin(finite) >= -0.05 and np.nanmax(finite) <= 1.05:
+            axes[2].set_ylim(-0.05, 1.05)
+    else:
+        plot_unavailable(
+            axes[2], "vehicle_thrust_setpoint.xyz[2] or actuator_controls_0.control[3] not logged"
+        )
+    setup_axis(axes[2], "Thrust setpoint", "normalized")
+
+    if rpm_series:
+        for index, signal in enumerate(rpm_series):
+            count = min(signal.t.size, signal.values.size)
+            if count:
+                axes[3].plot(
+                    signal.t[:count],
+                    signal.values[:count],
+                    lw=0.8,
+                    color=colors[index % len(colors)],
+                    label=signal.label,
+                )
+    else:
+        plot_unavailable(axes[3], "esc_status.esc[i].esc_rpm not logged")
+    setup_axis(axes[3], "ESC RPM", "RPM")
+    axes[-1].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for axis_index, ax in enumerate(axes):
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ncols = 4 if axis_index == 1 else 2
+            ax.legend(loc="best", fontsize=6 if axis_index == 1 else 7, ncols=ncols)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "actuator_outputs")
+
+
+def plot_terrain_estimate(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    """Plot published terrain/HAGL estimate from vehicle_local_position."""
+    lpos = get_ds(ulog, "vehicle_local_position")
+    lpos_sp = get_ds(ulog, "vehicle_local_position_setpoint")
+    trajectory_sp = get_ds(ulog, "trajectory_setpoint")
+    gpos = get_ds(ulog, "vehicle_global_position")
+    fig, axes = plt.subplots(
+        4,
+        1,
+        figsize=(10.5, 7.2),
         sharex=True,
         constrained_layout=True,
         gridspec_kw={
-            "height_ratios": [1.35] + [_BOOLEAN_PANEL_HEIGHT_RATIO] * 4,
+            "height_ratios": [1.35, 1.0] + [_BOOLEAN_PANEL_HEIGHT_RATIO] * 2,
         },
     )
 
@@ -1631,19 +3343,24 @@ def plot_terrain_estimate(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_
                 transform=ax.transAxes,
             )
         setup_axis(axes[0], "Terrain / HAGL estimate unavailable", "m")
-        setup_boolean_axis(axes[1], "dist_bottom_valid")
-        setup_boolean_axis(axes[2], "dist_bottom_sensor_bitfield != 0")
-        setup_boolean_axis(axes[3], "cs_rng_hgt")
-        setup_boolean_axis(axes[4], "cs_rng_kin_consistent")
-        axes[4].set_xlabel("flight-log relative time [s]")
+        setup_axis(axes[1], "Terrain-hold HAGL setpoint unavailable", "m")
+        setup_boolean_axis(axes[2], "dist_bottom_valid")
+        setup_boolean_axis(axes[3], "dist_bottom_sensor_bitfield != 0")
+        axes[3].set_xlabel("flight-log relative time [s]")
         shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
         return save_fig(fig, fig_dir, "terrain_estimate")
 
     t = t_rel(lpos, base_timestamp)
     dist_bottom = arr(lpos, "dist_bottom")
-    valid = arr(lpos, "dist_bottom_valid", int).astype(bool) if "dist_bottom_valid" in lpos.data else None
+    valid = (
+        arr(lpos, "dist_bottom_valid", int).astype(bool)
+        if "dist_bottom_valid" in lpos.data
+        else None
+    )
 
-    axes[0].plot(t, dist_bottom, lw=1.0, color="tab:blue", alpha=0.75, label="dist_bottom (HAGL estimate)")
+    axes[0].plot(
+        t, dist_bottom, lw=1.0, color="tab:blue", alpha=0.75, label="dist_bottom (HAGL estimate)"
+    )
 
     for key, label, color in [
         ("hagl_min", "hagl_min", "tab:red"),
@@ -1659,54 +3376,91 @@ def plot_terrain_estimate(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_
 
     setup_axis(axes[0], "Published HAGL / terrain estimate", "m")
 
+    local_terrain_z = None
     if "z" in lpos.data:
-        local_terrain_z = arr(lpos, "z") + dist_bottom
-        axes[0].plot(t, local_terrain_z, lw=1.0, color="tab:brown", label="z + dist_bottom (terrain, NED down)")
-        axes[0].plot(t, arr(lpos, "z"), lw=0.8, color="gray", ls=":", alpha=0.8, label="vehicle local z")
+        local_z = arr(lpos, "z")
+        local_terrain_z = local_z + dist_bottom
+        axes[0].plot(
+            t,
+            local_terrain_z,
+            lw=1.0,
+            color="tab:brown",
+            label="z + dist_bottom (terrain, NED down)",
+        )
+        axes[0].plot(
+            t, local_z, lw=0.8, color="gray", ls=":", alpha=0.8, label="vehicle local z"
+        )
     if gpos is not None and "terrain_alt" in gpos.data:
         tg = t_rel(gpos, base_timestamp)
-        axes[0].plot(tg, arr(gpos, "terrain_alt"), lw=0.9, color="tab:cyan",
-                     label="vehicle_global_position.terrain_alt")
+        axes[0].plot(
+            tg,
+            arr(gpos, "terrain_alt"),
+            lw=0.9,
+            color="tab:cyan",
+            label="vehicle_global_position.terrain_alt",
+        )
     setup_axis(axes[0], "Published HAGL and local terrain vertical position", "m")
 
+    axes[1].plot(
+        t,
+        dist_bottom,
+        lw=1.0,
+        color="tab:blue",
+        label="actual HAGL (dist_bottom)",
+    )
+    if local_terrain_z is not None and lpos_sp is not None and "z" in lpos_sp.data:
+        t_sp = t_rel(lpos_sp, base_timestamp)
+        sp_z = interp_step_previous(t_sp, arr(lpos_sp, "z"), t)
+        sp_hagl = local_terrain_z - sp_z
+        finite = np.isfinite(sp_hagl)
+        if finite.any():
+            axes[1].plot(
+                t[finite],
+                sp_hagl[finite],
+                lw=1.0,
+                color="tab:orange",
+                label="HAGL implied by vehicle_local_position_setpoint.z",
+            )
+    if local_terrain_z is not None and trajectory_sp is not None and "position[2]" in trajectory_sp.data:
+        t_sp = t_rel(trajectory_sp, base_timestamp)
+        sp_z = interp_step_previous(t_sp, arr(trajectory_sp, "position[2]"), t)
+        sp_hagl = local_terrain_z - sp_z
+        finite = np.isfinite(sp_hagl)
+        if finite.any():
+            axes[1].plot(
+                t[finite],
+                sp_hagl[finite],
+                lw=0.9,
+                color="tab:green",
+                ls="--",
+                label="HAGL implied by trajectory_setpoint.position[2]",
+            )
+    if not axes[1].has_data():
+        plot_unavailable(axes[1], "z setpoint or local terrain estimate not logged")
+    setup_axis(axes[1], "Actual HAGL versus z-setpoint implied HAGL", "m")
+
     if valid is not None:
-        axes[1].step(t, valid.astype(int), where="post", lw=1.0, color="tab:green", label="dist_bottom_valid")
+        axes[2].step(
+            t, valid.astype(int), where="post", lw=1.0, color="tab:green", label="dist_bottom_valid"
+        )
     else:
-        axes[1].text(0.5, 0.5, "not logged", ha="center", va="center", transform=axes[1].transAxes)
-    setup_boolean_axis(axes[1], "HAGL estimate valid")
+        axes[2].text(0.5, 0.5, "not logged", ha="center", va="center", transform=axes[2].transAxes)
+    setup_boolean_axis(axes[2], "HAGL estimate valid")
 
     if "dist_bottom_sensor_bitfield" in lpos.data:
         source_active = arr(lpos, "dist_bottom_sensor_bitfield", int) != 0
-        axes[2].step(t, source_active.astype(int), where="post", lw=1.0, color="tab:purple",
-                     label="dist_bottom_sensor_bitfield != 0")
+        axes[3].step(
+            t,
+            source_active.astype(int),
+            where="post",
+            lw=1.0,
+            color="tab:purple",
+            label="dist_bottom_sensor_bitfield != 0",
+        )
     else:
-        axes[2].text(0.5, 0.5, "not logged", ha="center", va="center", transform=axes[2].transAxes)
-    setup_boolean_axis(axes[2], "HAGL source bitfield active")
-
-    if flags is not None:
-        t_flags = t_rel(flags, base_timestamp)
-        if "cs_rng_hgt" in flags.data:
-            axes[3].step(t_flags, arr(flags, "cs_rng_hgt", int), where="post", lw=1.0,
-                         color="tab:red", label="cs_rng_hgt")
-        else:
-            axes[3].text(0.5, 0.5, "not logged", ha="center", va="center", transform=axes[3].transAxes)
-    else:
-        axes[3].text(0.5, 0.5, "estimator_status_flags not logged",
-                     ha="center", va="center", transform=axes[3].transAxes)
-    setup_boolean_axis(axes[3], "Range height fusion active")
-
-    if flags is not None:
-        t_flags = t_rel(flags, base_timestamp)
-        if "cs_rng_kin_consistent" in flags.data:
-            axes[4].step(t_flags, arr(flags, "cs_rng_kin_consistent", int), where="post", lw=1.0,
-                         color="tab:blue", label="cs_rng_kin_consistent")
-        else:
-            axes[4].text(0.5, 0.5, "not logged", ha="center", va="center", transform=axes[4].transAxes)
-    else:
-        axes[4].text(0.5, 0.5, "estimator_status_flags not logged",
-                     ha="center", va="center", transform=axes[4].transAxes)
-    setup_boolean_axis(axes[4], "Range kinematic consistency")
-    axes[4].set_xlabel("flight-log relative time [s]")
+        axes[3].text(0.5, 0.5, "not logged", ha="center", va="center", transform=axes[3].transAxes)
+    setup_boolean_axis(axes[3], "HAGL source bitfield active")
+    axes[3].set_xlabel("flight-log relative time [s]")
     shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
 
     for ax in axes:
@@ -1726,7 +3480,7 @@ def plot_baro_propwash(
     hover_max_speed_ms: float = 1.5,
     shade_modes: bool = True,
 ) -> Path:
-    """Five-panel barometer / propwash analysis using distance_sensor as truth.
+    """Five-panel barometer / propwash analysis using distance_sensor as reference.
 
     Panel 1: EKF local-z, optional rangefinder AGL, baro.
     Panel 2: baro−rangefinder divergence with ±threshold bands when available.
@@ -1741,12 +3495,13 @@ def plot_baro_propwash(
     lpos = get_ds(ulog, "vehicle_local_position")
     range_result = get_range(ulog, base_timestamp)
     thrust_result = get_thrust(ulog, base_timestamp)
-    ratios = get_ds(ulog, "estimator_innovation_test_ratios")
 
     fig, axes = plt.subplots(5, 1, figsize=(10.5, 11.0), sharex=True)
 
     # Propwash detection
-    pw_result = detect_propwash_events(ulog, base_timestamp, divergence_threshold_m, throttle_threshold)
+    pw_result = detect_propwash_events(
+        ulog, base_timestamp, divergence_threshold_m, throttle_threshold
+    )
     propwash_spans: list[tuple[float, float]] = []
     divergence_arr: np.ndarray | None = None
     t_div: np.ndarray | None = None
@@ -1764,10 +3519,14 @@ def plot_baro_propwash(
     # --- panel 1: altitude comparison ---
     if lpos:
         tl = t_rel(lpos, base_timestamp)
-        axes[0].plot(tl, -arr(lpos, "z"), label="EKF local alt (−z)", lw=1.1, color="tab:green", zorder=3)
+        axes[0].plot(
+            tl, -arr(lpos, "z"), label="EKF local alt (−z)", lw=1.1, color="tab:green", zorder=3
+        )
     if range_result is not None:
         t_r, r_m = range_result
-        axes[0].plot(t_r, r_m, label="Rangefinder AGL (truth)", lw=1.3, color="tab:blue", zorder=4)
+        axes[0].plot(
+            t_r, r_m, label="Rangefinder AGL", lw=1.3, color="tab:blue", zorder=4
+        )
     if air:
         ta = t_rel(air, base_timestamp)
         if range_result is not None:
@@ -1776,29 +3535,43 @@ def plot_baro_propwash(
         else:
             baro_agl = arr(air, "baro_alt_meter")
             baro_label = "Baro altitude"
-        axes[0].plot(ta, baro_agl, label=baro_label, lw=1.0,
-                     color="tab:orange", alpha=0.85)
+        axes[0].plot(ta, baro_agl, label=baro_label, lw=1.0, color="tab:orange", alpha=0.85)
     altitude_title = (
-        "Altitude comparison — rangefinder is truth; GPS excluded"
+        "Altitude comparison — rangefinder reference; GPS excluded"
         if range_result is not None
-        else "Altitude comparison — no distance_sensor topic; no range truth"
+        else "Altitude comparison — no distance_sensor topic; no range reference"
     )
     setup_axis(axes[0], altitude_title, "m AGL / MSL")
 
     # --- panel 2: baro-rangefinder divergence ---
     if t_div is not None and divergence_arr is not None:
-        axes[1].plot(t_div, divergence_arr, lw=1.0, color="tab:purple", label="baro − rangefinder (aligned)")
-        axes[1].axhline(divergence_threshold_m, color="tab:red", lw=0.9, ls="--",
-                        label=f"+{divergence_threshold_m:.2f} m threshold")
-        axes[1].axhline(-divergence_threshold_m, color="tab:red", lw=0.9, ls="--",
-                        label=f"−{divergence_threshold_m:.2f} m threshold")
+        axes[1].plot(
+            t_div, divergence_arr, lw=1.0, color="tab:purple", label="baro − rangefinder (aligned)"
+        )
+        axes[1].axhline(
+            divergence_threshold_m,
+            color="tab:red",
+            lw=0.9,
+            ls="--",
+            label=f"+{divergence_threshold_m:.2f} m threshold",
+        )
+        axes[1].axhline(
+            -divergence_threshold_m,
+            color="tab:red",
+            lw=0.9,
+            ls="--",
+            label=f"−{divergence_threshold_m:.2f} m threshold",
+        )
         axes[1].axhline(0.0, color="gray", lw=0.6, ls=":")
         setup_axis(axes[1], "Baro − rangefinder divergence (prop wash signal)", "m")
     else:
         axes[1].text(
-            0.5, 0.5,
+            0.5,
+            0.5,
             "No distance_sensor topic; rangefinder baro divergence not computed",
-            ha="center", va="center", transform=axes[1].transAxes,
+            ha="center",
+            va="center",
+            transform=axes[1].transAxes,
         )
         setup_axis(axes[1], "Rangefinder divergence unavailable", "m")
 
@@ -1806,8 +3579,13 @@ def plot_baro_propwash(
     if thrust_result is not None:
         t_thr, thrust = thrust_result
         axes[2].plot(t_thr, thrust, lw=0.9, color="tab:brown", label="|thrust| (normalized)")
-        axes[2].axhline(throttle_threshold, color="gray", lw=0.8, ls="--",
-                        label=f"threshold {throttle_threshold:.2f}")
+        axes[2].axhline(
+            throttle_threshold,
+            color="gray",
+            lw=0.8,
+            ls="--",
+            label=f"threshold {throttle_threshold:.2f}",
+        )
         axes[2].set_ylim(-0.05, 1.05)
     setup_axis(axes[2], "Normalized thrust (vehicle_thrust_setpoint)", "normalized")
 
@@ -1839,8 +3617,13 @@ def plot_baro_propwash(
             ax.axvspan(start, end, color="red", alpha=0.15, zorder=0)
 
     if propwash_spans:
-        axes[0].axvspan(propwash_spans[0][0], propwash_spans[0][0], color="red",
-                        alpha=0.4, label="propwash event")
+        axes[0].axvspan(
+            propwash_spans[0][0],
+            propwash_spans[0][0],
+            color="red",
+            alpha=0.4,
+            label="propwash event",
+        )
 
     for ax in axes:
         handles, _labels = ax.get_legend_handles_labels()
@@ -1850,53 +3633,46 @@ def plot_baro_propwash(
     return save_fig(fig, fig_dir, "baro_propwash")
 
 
-def plot_gps_quality(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_gps_quality(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     gps = get_ds(ulog, "vehicle_gps_position")
-    gps_status = get_ds(ulog, "estimator_gps_status")
     disabled_label = gps_disabled_label(ulog)
-    fig, axes = plt.subplots(5, 1, figsize=(10.5, 9.0), sharex=True)
+    fields = [
+        ("fix_type", "Fix type", "enum", "tab:blue"),
+        ("satellites_used", "Satellites used", "count", "tab:orange"),
+        ("hdop", "HDOP", "DOP", "tab:blue"),
+        ("vdop", "VDOP", "DOP", "tab:orange"),
+        ("eph", "EPH reported horizontal accuracy", "m", "tab:blue"),
+        ("epv", "EPV reported vertical accuracy", "m", "tab:orange"),
+        ("s_variance_m_s", "Speed accuracy", "m/s", "tab:green"),
+        ("vel_d_m_s", "GPS vertical velocity D", "m/s", "tab:purple"),
+        ("jamming_state", "Jamming state", "enum", "tab:red"),
+        ("jamming_indicator", "Jamming indicator", "indicator", "tab:red"),
+        ("spoofing_state", "Spoofing state", "enum", "tab:brown"),
+    ]
+    plotted_fields = [field for field in fields if gps is not None and field[0] in gps.data]
+    nrows = max(1, len(plotted_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(4.0, 0.7 + 0.9 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
 
-    if gps:
+    if not plotted_fields or gps is None:
+        plot_unavailable(axes[0], "vehicle_gps_position not logged")
+        setup_axis(axes[0], "GPS quality unavailable", "value")
+    else:
         t = t_rel(gps, base_timestamp)
-        for key in ["fix_type", "satellites_used"]:
-            if key in gps.data:
-                axes[0].plot(t, arr(gps, key), label=key)
-        for key in ["hdop", "vdop"]:
-            if key in gps.data:
-                axes[1].plot(t, arr(gps, key), label=key.upper())
-        for key in ["eph", "epv"]:
-            if key in gps.data:
-                axes[2].plot(t, arr(gps, key), label=key.upper())
-        for key, label in [("s_variance_m_s", "speed accuracy"), ("vel_d_m_s", "GPS vel D")]:
-            if key in gps.data:
-                axes[3].plot(t, arr(gps, key), label=label)
-        for key in ["jamming_state", "jamming_indicator", "spoofing_state"]:
-            if key in gps.data:
-                axes[4].plot(t, arr(gps, key), label=key)
+        for ax, (field, title, ylabel, color) in zip(axes, plotted_fields):
+            plot_scalar_trace(ax, t, arr(gps, field), title, ylabel, color=color)
+            if field in {"fix_type", "satellites_used", "jamming_state", "spoofing_state"}:
+                setup_integer_value_axis(ax, arr(gps, field, int))
 
-    if gps_status:
-        t = t_rel(gps_status, base_timestamp)
-        checks = [
-            "check_fail_gps_fix",
-            "check_fail_min_sat_count",
-            "check_fail_max_pdop",
-            "check_fail_max_vert_err",
-            "check_fail_max_spd_err",
-            "check_fail_max_vert_spd_err",
-        ]
-        offset = 0.0
-        for key in checks:
-            if key in gps_status.data:
-                axes[4].step(t, arr(gps_status, key, int) + offset, where="post", lw=0.8, label=key)
-                offset += 1.1
-
-    setup_axis(axes[0], "Fix and satellites")
-    setup_axis(axes[1], "DOP")
-    setup_axis(axes[2], "Reported position accuracy (EPH/EPV)", "m")
-    setup_axis(axes[3], "Speed metrics")
-    setup_axis(axes[4], "Jamming/spoofing and GPS check flags")
-    axes[4].set_xlabel("flight-log relative time [s]")
-    axes[1].set_ylim(-0.5, 10.0)
+    axes[-1].set_xlabel("flight-log relative time [s]")
     shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
 
     if disabled_label is not None:
@@ -1914,53 +3690,1148 @@ def plot_gps_quality(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes
                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.65, "pad": 1.5},
             )
 
-    fig.text(0.5, 0.01,
-             "Note: GPS altitude is NOT used as truth for baro divergence. "
-             "Rangefinder-based divergence requires a logged distance_sensor topic.",
-             ha="center", fontsize=8, style="italic", color="gray")
-
-    for ax in axes:
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(handles, labels, loc="best", fontsize=7, ncols=2)
+    fig.text(
+        0.5,
+        0.01,
+        "Note: GPS altitude is NOT used for baro divergence scoring. "
+        "Rangefinder-based divergence requires a logged distance_sensor topic.",
+        ha="center",
+        fontsize=8,
+        style="italic",
+        color="gray",
+    )
 
     return save_fig(fig, fig_dir, "gps_quality")
 
 
-def plot_fusion_flags(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
-    flags = get_ds(ulog, "estimator_status_flags")
-    fields = available_fields(flags, _PLOTTED_FUSION_FLAG_FIELDS)
-    nrows = max(1, len(fields))
+def plot_gps_checks(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    gps_status = get_ds(ulog, "estimator_gps_status")
+    checks = [
+        ("check_fail_gps_fix", "GPS fix check fail"),
+        ("check_fail_min_sat_count", "Minimum satellite count check fail"),
+        ("check_fail_max_pdop", "Maximum PDOP check fail"),
+        ("check_fail_max_horz_err", "Maximum horizontal error check fail"),
+        ("check_fail_max_vert_err", "Maximum vertical error check fail"),
+        ("check_fail_max_spd_err", "Maximum speed error check fail"),
+        ("check_fail_max_horz_drift", "Maximum horizontal drift check fail"),
+        ("check_fail_max_vert_drift", "Maximum vertical drift check fail"),
+        ("check_fail_max_horz_spd_err", "Maximum horizontal speed check fail"),
+        ("check_fail_max_vert_spd_err", "Maximum vertical speed check fail"),
+    ]
+    plotted = [item for item in checks if gps_status is not None and item[0] in gps_status.data]
+    nrows = max(1, len(plotted))
     fig, axes = plt.subplots(
         nrows,
         1,
-        figsize=(10.5, max(2.0, 0.72 + 0.50 * nrows)),
+        figsize=(10.5, max(4.0, 0.7 + 0.95 * nrows)),
         sharex=True,
         constrained_layout=True,
     )
     axes = np.ravel(np.atleast_1d(axes))
 
-    if not fields or flags is None:
-        axes[0].text(0.5, 0.5, "estimator_status_flags not logged", ha="center", va="center",
-                     transform=axes[0].transAxes)
-        setup_boolean_axis(axes[0], "Fusion flags unavailable")
+    if not plotted or gps_status is None:
+        plot_unavailable(axes[0], "estimator_gps_status check fields not logged")
+        setup_boolean_axis(axes[0], "GPS checks unavailable")
     else:
-        t = t_rel(flags, base_timestamp)
-        for ax, key in zip(axes, fields):
-            ax.step(t, arr(flags, key, int), where="post", lw=1.0, color="tab:blue", label=key)
-            setup_boolean_axis(ax, key)
-            ax.legend(loc="best", fontsize=7)
+        t = t_rel(gps_status, base_timestamp)
+        for ax, (field, title) in zip(axes, plotted):
+            plot_boolean_trace(ax, t, arr(gps_status, field, int), title, color="tab:red")
 
     axes[-1].set_xlabel("flight-log relative time [s]")
     shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
-    return save_fig(fig, fig_dir, "fusion_flags")
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "gps_checks")
 
 
-def plot_reset_counters(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+_SENSOR_TIMING_TOPIC_LABELS = [
+    ("vehicle_imu", "IMU"),
+    ("vehicle_optical_flow", "Optical flow"),
+    ("vehicle_air_data", "Barometer"),
+    ("vehicle_magnetometer", "Magnetometer"),
+    ("sensor_mag", "Raw magnetometer"),
+    ("vehicle_gps_position", "GPS / GNSS"),
+    ("distance_sensor", "Range finder"),
+    ("vehicle_visual_odometry", "External vision"),
+]
+
+
+def _timing_series_label(label: str, ds, include_instance: bool) -> str:
+    multi_id = getattr(ds, "multi_id", 0)
+    return f"{label}[{multi_id}]" if include_instance or multi_id else label
+
+
+def sensor_latency_series(ulog: ULog, base_timestamp: int) -> list[SignalSeries]:
+    series: list[SignalSeries] = []
+    for topic, label in _SENSOR_TIMING_TOPIC_LABELS:
+        datasets = get_all_ds(ulog, topic)
+        include_instance = len(datasets) > 1
+        for ds in datasets:
+            latency_result = measurement_latency_s(ds, base_timestamp)
+            if latency_result is None or not np.any(np.isfinite(latency_result[1])):
+                continue
+            t, latency_s, source_field = latency_result
+            series.append(
+                SignalSeries(
+                    label=(
+                        f"{_timing_series_label(label, ds, include_instance)} "
+                        f"({topic}.timestamp - {source_field})"
+                    ),
+                    t=t,
+                    values=latency_s * 1e3,
+                )
+            )
+    return series
+
+
+def plot_sensor_latency(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    latency_series = sensor_latency_series(ulog, base_timestamp)
+    nrows = max(1, len(latency_series))
+
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(5.5, 0.9 + 1.2 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+
+    if latency_series:
+        for ax, sensor_series in zip(axes, latency_series):
+            ax.plot(sensor_series.t, sensor_series.values, lw=0.9, color="tab:purple")
+            setup_latency_axis(ax, sensor_series.values)
+            setup_axis(ax, sensor_series.label, "ms")
+    else:
+        plot_unavailable(axes[0], "timestamp_sample latency fields not logged")
+        setup_axis(axes[0], "Sensor sample-to-publication latency unavailable", "ms")
+    axes[-1].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "sensor_latency")
+
+
+def plot_imu_health(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    imus = get_all_ds(ulog, "vehicle_imu_status")
+    imu = imus[0] if imus else None
+    sensor_combined = get_ds(ulog, "sensor_combined")
     status = get_ds(ulog, "estimator_status")
+    flags = get_ds(ulog, "estimator_status_flags")
+    bool_fields = []
+    if flags is not None:
+        t_flags = t_rel(flags, base_timestamp)
+        for field in ["fs_bad_acc_vertical", "fs_bad_acc_bias", "fs_bad_acc_clipping"]:
+            if field in flags.data:
+                bool_fields.append((field, t_flags, arr(flags, field, int)))
+    nrows = 7 + max(1, len(bool_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(9.8, 0.7 + 1.0 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_idx = 0
+
+    raw_accel_plotted = False
+    if sensor_combined is not None:
+        t_sc = t_rel(sensor_combined, base_timestamp)
+        for index, color in enumerate(["tab:blue", "tab:orange", "tab:green"]):
+            field = f"accelerometer_m_s2[{index}]"
+            if field in sensor_combined.data:
+                axes[axis_idx].plot(
+                    t_sc,
+                    arr(sensor_combined, field),
+                    lw=0.7,
+                    color=color,
+                    label=f"sensor_combined.{field}",
+                )
+                raw_accel_plotted = True
+    elif imu is not None and "delta_velocity_dt" in imu.data:
+        t_imu = t_rel(imu, base_timestamp)
+        dt = arr(imu, "delta_velocity_dt") * 1e-6
+        dt = np.where(dt > 0.0, dt, np.nan)
+        for index, color in enumerate(["tab:blue", "tab:orange", "tab:green"]):
+            field = f"delta_velocity[{index}]"
+            if field in imu.data:
+                axes[axis_idx].plot(
+                    t_imu,
+                    arr(imu, field) / dt,
+                    lw=0.7,
+                    color=color,
+                    label=f"vehicle_imu.{field} / delta_velocity_dt",
+                )
+                raw_accel_plotted = True
+    if not raw_accel_plotted:
+        plot_unavailable(axes[axis_idx], "raw accelerometer measurements not logged")
+    setup_axis(axes[axis_idx], "Raw accelerometer measurements", "m/s^2")
+    axis_idx += 1
+
+    raw_gyro_plotted = False
+    if sensor_combined is not None:
+        t_sc = t_rel(sensor_combined, base_timestamp)
+        for index, color in enumerate(["tab:blue", "tab:orange", "tab:green"]):
+            field = f"gyro_rad[{index}]"
+            if field in sensor_combined.data:
+                axes[axis_idx].plot(
+                    t_sc,
+                    arr(sensor_combined, field),
+                    lw=0.7,
+                    color=color,
+                    label=f"sensor_combined.{field}",
+                )
+                raw_gyro_plotted = True
+    elif imu is not None and "delta_angle_dt" in imu.data:
+        t_imu = t_rel(imu, base_timestamp)
+        dt = arr(imu, "delta_angle_dt") * 1e-6
+        dt = np.where(dt > 0.0, dt, np.nan)
+        for index, color in enumerate(["tab:blue", "tab:orange", "tab:green"]):
+            field = f"delta_angle[{index}]"
+            if field in imu.data:
+                axes[axis_idx].plot(
+                    t_imu,
+                    arr(imu, field) / dt,
+                    lw=0.7,
+                    color=color,
+                    label=f"vehicle_imu.{field} / delta_angle_dt",
+                )
+                raw_gyro_plotted = True
+    if not raw_gyro_plotted:
+        plot_unavailable(axes[axis_idx], "raw gyroscope measurements not logged")
+    setup_axis(axes[axis_idx], "Raw gyroscope measurements", "rad/s")
+    axis_idx += 1
+
+    accel_vibe_plotted = False
+    for index, ds in enumerate(imus):
+        if "accel_vibration_metric" not in ds.data:
+            continue
+        t_imu = t_rel(ds, base_timestamp)
+        axes[axis_idx].plot(
+            t_imu,
+            arr(ds, "accel_vibration_metric"),
+            lw=0.9,
+            label=f"Accel {getattr(ds, 'multi_id', index)} vibration",
+        )
+        accel_vibe_plotted = True
+    if status is not None:
+        t_status = t_rel(status, base_timestamp)
+        for index, field in enumerate(["vibe[0]", "vibe[1]", "vibe[2]"]):
+            if field in status.data:
+                axes[axis_idx].plot(
+                    t_status,
+                    arr(status, field),
+                    lw=0.8,
+                    ls=":",
+                    label=f"estimator_status.{field}",
+                )
+                accel_vibe_plotted = True
+    if accel_vibe_plotted:
+        add_vibration_threshold_bands(axes[axis_idx])
+    else:
+        plot_unavailable(axes[axis_idx], "IMU accel vibration metrics not logged")
+    setup_axis(axes[axis_idx], "IMU accel vibration metrics", "m/s^2")
+    axis_idx += 1
+
+    coning_plotted = False
+    for index, ds in enumerate(imus):
+        if "delta_angle_coning_metric" in ds.data:
+            axes[axis_idx].plot(
+                t_rel(ds, base_timestamp),
+                arr(ds, "delta_angle_coning_metric"),
+                lw=0.9,
+                label=f"IMU {getattr(ds, 'multi_id', index)}",
+            )
+            coning_plotted = True
+    if not coning_plotted:
+        plot_unavailable(axes[axis_idx], "vehicle_imu_status.delta_angle_coning_metric not logged")
+    setup_axis(axes[axis_idx], "IMU delta-angle coning metric", "metric")
+    axis_idx += 1
+
+    if imu is not None:
+        t_imu = t_rel(imu, base_timestamp)
+        for index, color in enumerate(["tab:blue", "tab:orange", "tab:green"]):
+            field = f"accel_clipping[{index}]"
+            if field in imu.data:
+                axes[axis_idx].step(
+                    t_imu, arr(imu, field, int), where="post", lw=0.9, color=color, label=field
+                )
+    if sensor_combined is not None and "accelerometer_clipping" in sensor_combined.data:
+        t_sc = t_rel(sensor_combined, base_timestamp)
+        axes[axis_idx].step(
+            t_sc,
+            arr(sensor_combined, "accelerometer_clipping", int),
+            where="post",
+            lw=0.8,
+            color="tab:red",
+            label="sensor_combined.accelerometer_clipping",
+        )
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "accelerometer clipping counters not logged")
+    setup_axis(axes[axis_idx], "Accelerometer clipping", "count / mask")
+    setup_integer_value_axis(
+        axes[axis_idx],
+        np.asarray(axes[axis_idx].lines[0].get_ydata()) if axes[axis_idx].lines else np.array([]),
+    )
+    axis_idx += 1
+
+    if imu is not None:
+        t_imu = t_rel(imu, base_timestamp)
+        for index, color in enumerate(["tab:blue", "tab:orange", "tab:green"]):
+            field = f"gyro_clipping[{index}]"
+            if field in imu.data:
+                axes[axis_idx].step(
+                    t_imu, arr(imu, field, int), where="post", lw=0.9, color=color, label=field
+                )
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "gyroscope clipping counters not logged")
+    setup_axis(axes[axis_idx], "Gyroscope clipping", "count")
+    setup_integer_value_axis(
+        axes[axis_idx],
+        np.asarray(axes[axis_idx].lines[0].get_ydata()) if axes[axis_idx].lines else np.array([]),
+    )
+    axis_idx += 1
+
+    if bool_fields:
+        for field, t, values in bool_fields:
+            plot_boolean_trace(axes[axis_idx], t, values, f"Estimator IMU quality flag: {field}")
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "estimator_status_flags IMU quality flags not logged")
+        setup_boolean_axis(axes[axis_idx], "Estimator IMU quality flags")
+        axis_idx += 1
+
+    if status is not None:
+        t_status = t_rel(status, base_timestamp)
+        plotted = False
+        for field, color in [
+            ("filter_fault_flags", "tab:red"),
+            ("solution_status_flags", "tab:purple"),
+            ("health_flags", "tab:green"),
+        ]:
+            if field in status.data:
+                axes[axis_idx].step(
+                    t_status,
+                    arr(status, field, int),
+                    where="post",
+                    lw=0.9,
+                    color=color,
+                    label=field,
+                )
+                plotted = True
+        if not plotted:
+            plot_unavailable(axes[axis_idx], "estimator_status health masks not logged")
+    else:
+        plot_unavailable(axes[axis_idx], "estimator_status not logged")
+    setup_axis(axes[axis_idx], "Estimator health / fault masks", "raw mask")
+    axes[axis_idx].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "imu_health")
+
+
+def plot_barometer_health(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    air = get_ds(ulog, "vehicle_air_data")
+    events = get_ds(ulog, "estimator_event_flags")
+    raw_fields = []
+    if air is not None:
+        t_air = t_rel(air, base_timestamp)
+        for field, ylabel, color in [
+            ("baro_pressure_pa", "Pa", "tab:blue"),
+            ("baro_temp_celcius", "deg C", "tab:red"),
+            ("rho", "kg/m^3", "tab:green"),
+        ]:
+            if field in air.data:
+                raw_fields.append((field, t_air, arr(air, field), ylabel, color))
+    bool_fields = []
+    if events is not None:
+        t_events = t_rel(events, base_timestamp)
+        for field, color in [
+            ("reset_hgt_to_baro", "tab:green"),
+            ("height_sensor_timeout", "tab:red"),
+        ]:
+            if field in events.data:
+                bool_fields.append((field, t_events, arr(events, field, int), color))
+    nrows = 2 + max(1, len(raw_fields)) + max(1, len(bool_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(9.2, 0.7 + 1.0 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_idx = 0
+
+    if air is not None:
+        t_air = t_rel(air, base_timestamp)
+        if "baro_alt_meter" in air.data:
+            axes[axis_idx].plot(
+                t_air,
+                arr(air, "baro_alt_meter"),
+                lw=0.9,
+                color="tab:orange",
+                label="vehicle_air_data.baro_alt_meter",
+            )
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "vehicle_air_data.baro_alt_meter not logged")
+    setup_axis(axes[axis_idx], "Barometer altitude", "m")
+    axis_idx += 1
+
+    if raw_fields:
+        for field, t, values, ylabel, color in raw_fields:
+            plot_scalar_trace(
+                axes[axis_idx],
+                t,
+                values,
+                f"Barometer raw health: {field}",
+                ylabel,
+                color=color,
+            )
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "barometer pressure/temperature fields not logged")
+        setup_axis(axes[axis_idx], "Barometer raw health fields", "logged units")
+        axis_idx += 1
+
+    baro_ratio = get_metric_series(ulog, base_timestamp, "baro_vpos", "test_ratio")
+    axes[axis_idx].axhline(1.0, color="black", lw=0.9, ls="--", label="gate (1.0)")
+    if baro_ratio is not None:
+        axes[axis_idx].plot(
+            baro_ratio.t,
+            np.where(np.isfinite(baro_ratio.values), baro_ratio.values, np.nan),
+            lw=0.9,
+            color="tab:red",
+            label=baro_ratio.source,
+        )
+        axes[axis_idx].set_yscale("symlog", linthresh=0.1)
+    else:
+        plot_unavailable(axes[axis_idx], "barometer height test ratio not logged")
+    setup_axis(axes[axis_idx], "Barometer height innovation test ratio", "test ratio")
+    axis_idx += 1
+
+    if bool_fields:
+        for field, t, values, color in bool_fields:
+            plot_boolean_trace(axes[axis_idx], t, values, f"Barometer status: {field}", color=color)
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "barometer fusion/reset/timeout flags not logged")
+        setup_boolean_axis(axes[axis_idx], "Barometer fusion and timeout/reset flags")
+        axis_idx += 1
+    axes[axis_idx - 1].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "barometer_health")
+
+
+def plot_magnetometer_health(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    mag = get_ds(ulog, "vehicle_magnetometer") or get_ds(ulog, "sensor_mag")
+    flags = get_ds(ulog, "estimator_status_flags")
+    bool_fields = []
+    if flags is not None:
+        t_flags = t_rel(flags, base_timestamp)
+        for field, color in [("reject_yaw", "tab:red")]:
+            if field in flags.data:
+                bool_fields.append((field, t_flags, arr(flags, field, int), color))
+    nrows = 2 + max(1, len(bool_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(9.2, 0.7 + 0.95 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_idx = 0
+
+    if mag is not None:
+        t_mag = t_rel(mag, base_timestamp)
+        for field, color in [
+            ("magnetometer_ga[0]", "tab:blue"),
+            ("magnetometer_ga[1]", "tab:orange"),
+            ("magnetometer_ga[2]", "tab:green"),
+            ("x", "tab:blue"),
+            ("y", "tab:orange"),
+            ("z", "tab:green"),
+        ]:
+            if field in mag.data:
+                axes[axis_idx].plot(
+                    t_mag, arr(mag, field), lw=0.8, color=color, label=f"{mag.name}.{field}"
+                )
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "vehicle_magnetometer / sensor_mag components not logged")
+    setup_axis(axes[axis_idx], "Magnetometer components", "gauss / raw")
+    axis_idx += 1
+
+    heading_ratio = get_metric_series(ulog, base_timestamp, "heading", "test_ratio")
+    axes[axis_idx].axhline(1.0, color="black", lw=0.9, ls="--", label="gate (1.0)")
+    if heading_ratio is not None:
+        axes[axis_idx].plot(
+            heading_ratio.t,
+            np.where(np.isfinite(heading_ratio.values), heading_ratio.values, np.nan),
+            lw=0.9,
+            color="tab:red",
+            label=heading_ratio.source,
+        )
+        axes[axis_idx].set_yscale("symlog", linthresh=0.1)
+    else:
+        plot_unavailable(axes[axis_idx], "heading innovation test ratio not logged")
+    setup_axis(axes[axis_idx], "Heading innovation test ratio", "test ratio")
+    axis_idx += 1
+
+    if bool_fields:
+        for field, t, values, color in bool_fields:
+            plot_boolean_trace(
+                axes[axis_idx], t, values, f"Magnetometer status: {field}", color=color
+            )
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "magnetometer rejection flags not logged")
+        setup_boolean_axis(axes[axis_idx], "Magnetometer rejection flags")
+        axis_idx += 1
+    axes[axis_idx - 1].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "magnetometer_health")
+
+
+def plot_optical_flow_sensor_health(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    aid = get_ds(ulog, "estimator_aid_src_optical_flow")
+    vof = get_ds(ulog, "vehicle_optical_flow")
+    of_vel = get_ds(ulog, "estimator_optical_flow_vel")
+    flags = get_ds(ulog, "estimator_status_flags")
+    bool_fields = []
+    if aid is not None:
+        t_aid = t_rel(aid, base_timestamp)
+        for field, color in [("fusion_enabled", "tab:green"), ("innovation_rejected", "tab:red")]:
+            if field in aid.data:
+                values = arr(aid, field, int)
+                label = f"aid {field}"
+                if field == "fusion_enabled":
+                    percentage = boolean_time_percentage_label(t_aid, values)
+                    if percentage is not None:
+                        label = f"{label} ({percentage})"
+                bool_fields.append((label, t_aid, values, color))
+    if flags is not None:
+        t_flags = t_rel(flags, base_timestamp)
+        for field, color in [
+            ("reject_optflow_x", "tab:orange"),
+            ("reject_optflow_y", "tab:red"),
+            ("fs_bad_optflow_x", "tab:green"),
+            ("fs_bad_optflow_y", "tab:purple"),
+        ]:
+            if field in flags.data:
+                bool_fields.append((field, t_flags, arr(flags, field, int), color))
+    nrows = 5 + max(1, len(bool_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(9.8, 0.7 + 0.95 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_idx = 0
+
+    if vof is not None:
+        t_vof = t_rel(vof, base_timestamp)
+        if "quality" in vof.data:
+            axes[axis_idx].plot(
+                t_vof,
+                arr(vof, "quality"),
+                lw=0.9,
+                color="tab:blue",
+                label="vehicle_optical_flow.quality",
+            )
+            axes[axis_idx].axhline(50, color="tab:red", lw=0.8, ls="--", label="quality floor 50")
+            axes[axis_idx].set_ylim(0, 270)
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "vehicle_optical_flow.quality not logged")
+    setup_axis(axes[axis_idx], "Optical-flow sensor quality", "0-255")
+    axis_idx += 1
+
+    plot_optical_flow_measurement_counts(axes[axis_idx], ulog, base_timestamp)
+    axis_idx += 1
+
+    if vof is not None:
+        t_vof = t_rel(vof, base_timestamp)
+        for field, color in [("pixel_flow[0]", "tab:blue"), ("pixel_flow[1]", "tab:orange")]:
+            if field in vof.data:
+                axes[axis_idx].plot(
+                    t_vof,
+                    arr(vof, field),
+                    lw=0.9,
+                    color=color,
+                    label=f"vehicle_optical_flow.{field}",
+                )
+        axes[axis_idx].axhline(0, color="gray", lw=0.6, ls=":")
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "vehicle_optical_flow pixel flow not logged")
+    setup_axis(axes[axis_idx], "Optical-flow pixel flow", "rad")
+    axis_idx += 1
+
+    plot_direct_test_ratios(
+        axes[axis_idx],
+        aid,
+        base_timestamp,
+        "Optical-flow innovation test ratios",
+        "estimator_aid_src_optical_flow",
+    )
+    axis_idx += 1
+
+    if bool_fields:
+        for field, t, values, color in bool_fields:
+            plot_boolean_trace(
+                axes[axis_idx], t, values, f"Optical-flow status: {field}", color=color
+            )
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "optical-flow fusion/rejection flags not logged")
+        setup_boolean_axis(axes[axis_idx], "Optical-flow status flags")
+        axis_idx += 1
+
+    if of_vel is not None:
+        t_vel = t_rel(of_vel, base_timestamp)
+        for field, color in [("vel_body[0]", "tab:blue"), ("vel_body[1]", "tab:orange")]:
+            if field in of_vel.data:
+                axes[axis_idx].plot(
+                    t_vel,
+                    arr(of_vel, field),
+                    lw=0.9,
+                    color=color,
+                    label=f"estimator_optical_flow_vel.{field}",
+                )
+        axes[axis_idx].axhline(0, color="gray", lw=0.6, ls=":")
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "estimator_optical_flow_vel body velocity not logged")
+    setup_axis(axes[axis_idx], "EKF-fused optical-flow body velocity", "m/s")
+    axes[axis_idx].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "optical_flow_health")
+
+
+def plot_optical_flow_fusion_gating(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    aid = get_ds(ulog, "estimator_aid_src_optical_flow")
+    flags = get_ds(ulog, "estimator_status_flags")
+    bool_fields = []
+    if aid is not None:
+        t_aid = t_rel(aid, base_timestamp)
+        for field, color in [
+            ("fusion_enabled", "tab:green"),
+            ("innovation_rejected", "tab:red"),
+        ]:
+            if field in aid.data:
+                values = arr(aid, field, int)
+                label = f"aid {field}"
+                if field == "fusion_enabled":
+                    percentage = boolean_time_percentage_label(t_aid, values)
+                    if percentage is not None:
+                        label = f"{label} ({percentage})"
+                bool_fields.append((label, t_aid, values, color))
+    if flags is not None:
+        t_flags = t_rel(flags, base_timestamp)
+        for field, color in [
+            ("reject_optflow_x", "tab:orange"),
+            ("reject_optflow_y", "tab:red"),
+            ("fs_bad_optflow_x", "tab:green"),
+            ("fs_bad_optflow_y", "tab:purple"),
+        ]:
+            if field in flags.data:
+                bool_fields.append((field, t_flags, arr(flags, field, int), color))
+
+    nrows = 7 + max(1, len(bool_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(9.8, 0.75 + 1.0 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_idx = 0
+
+    for key, title in [
+        ("flow[0]", "Optical-flow X innovation test ratio"),
+        ("flow[1]", "Optical-flow Y innovation test ratio"),
+    ]:
+        series = get_metric_series(ulog, base_timestamp, key, "test_ratio")
+        if series is not None:
+            y = np.where(np.isfinite(series.values), series.values, np.nan)
+            axes[axis_idx].plot(series.t, y, lw=0.9, color="tab:blue", label=series.source)
+            axes[axis_idx].set_yscale("symlog", linthresh=0.1)
+        else:
+            plot_unavailable(axes[axis_idx], f"{key} optical-flow test ratio not logged")
+        axes[axis_idx].axhline(1.0, color="black", lw=0.9, ls="--", label="gate (1.0)")
+        axes[axis_idx].axhline(0.36, color="gray", lw=0.7, ls=":", label="3 sigma equiv")
+        setup_axis(axes[axis_idx], title, "test ratio")
+        axis_idx += 1
+
+    for key, title in [
+        ("flow[0]", "Optical-flow X innovation versus 5 sigma gate"),
+        ("flow[1]", "Optical-flow Y innovation versus 5 sigma gate"),
+    ]:
+        innovation = get_metric_series(ulog, base_timestamp, key, "innovation")
+        variance_series = get_metric_series(ulog, base_timestamp, key, "innovation_variance")
+        if innovation is not None and variance_series is not None:
+            variance = interp_at(variance_series.t, variance_series.values, innovation.t)
+            threshold = 5.0 * np.sqrt(np.maximum(variance, 0.0))
+            axes[axis_idx].plot(
+                innovation.t,
+                innovation.values,
+                lw=0.9,
+                color="tab:blue",
+                label=innovation.source,
+            )
+            axes[axis_idx].plot(
+                innovation.t,
+                threshold,
+                color="tab:red",
+                lw=0.8,
+                ls="--",
+                label="+5 sigma gate",
+            )
+            axes[axis_idx].plot(
+                innovation.t,
+                -threshold,
+                color="tab:red",
+                lw=0.8,
+                ls="--",
+                label="-5 sigma gate",
+            )
+        else:
+            plot_unavailable(axes[axis_idx], f"{key} innovation or variance not logged")
+        setup_axis(axes[axis_idx], title, "rad")
+        axis_idx += 1
+
+    plot_optical_flow_measurement_counts(axes[axis_idx], ulog, base_timestamp)
+    axis_idx += 1
+
+    delta_result = time_since_last_fuse_s(aid, base_timestamp)
+    if delta_result is not None and np.any(np.isfinite(delta_result[1])):
+        delta_t, delta_s = delta_result
+        axes[axis_idx].plot(delta_t, delta_s, lw=0.9, color="tab:purple")
+    else:
+        plot_unavailable(
+            axes[axis_idx],
+            "estimator_aid_src_optical_flow.time_last_fuse not logged",
+        )
+    setup_axis(
+        axes[axis_idx],
+        "Optical-flow time since last successful fusion",
+        "s",
+    )
+    axis_idx += 1
+
+    if aid is not None and "fused" in aid.data:
+        plot_boolean_trace(
+            axes[axis_idx],
+            t_rel(aid, base_timestamp),
+            arr(aid, "fused", int),
+            "Optical-flow gating status: aid fused",
+            color="tab:blue",
+        )
+    else:
+        plot_unavailable(axes[axis_idx], "estimator_aid_src_optical_flow.fused not logged")
+        setup_boolean_axis(axes[axis_idx], "Optical-flow gating status: aid fused")
+    axis_idx += 1
+
+    if bool_fields:
+        for field, t, values, color in bool_fields:
+            plot_boolean_trace(
+                axes[axis_idx], t, values, f"Optical-flow gating status: {field}", color
+            )
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "optical-flow fusion/rejection flags not logged")
+        setup_boolean_axis(axes[axis_idx], "Optical-flow fusion/rejection flags")
+        axis_idx += 1
+
+    axes[-1].set_xlabel("flight-log relative time [s]")
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "optical_flow_fusion_gating")
+
+
+def plot_rangefinder_health(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    dist = get_ds(ulog, "distance_sensor")
+    lpos = get_ds(ulog, "vehicle_local_position")
+    aid = get_ds(ulog, "estimator_aid_src_rng_hgt")
+    flags = get_ds(ulog, "estimator_status_flags")
+    events = get_ds(ulog, "estimator_event_flags")
+    bool_fields = []
+    if aid is not None:
+        t_aid = t_rel(aid, base_timestamp)
+        for field, color in [("fusion_enabled", "tab:green"), ("innovation_rejected", "tab:red")]:
+            if field in aid.data:
+                bool_fields.append((f"aid {field}", t_aid, arr(aid, field, int), color))
+    if flags is not None:
+        t_flags = t_rel(flags, base_timestamp)
+        for field, color in [("reject_hagl", "tab:red")]:
+            if field in flags.data:
+                bool_fields.append((field, t_flags, arr(flags, field, int), color))
+    if events is not None:
+        t_events = t_rel(events, base_timestamp)
+        for field, color in [
+            ("height_sensor_timeout", "tab:red"),
+            ("reset_hgt_to_rng", "tab:green"),
+        ]:
+            if field in events.data:
+                bool_fields.append((field, t_events, arr(events, field, int), color))
+    range_ratio, hagl_rate_ratio = rangefinder_test_ratio_series(ulog, base_timestamp)
+    nrows = 3 + int(hagl_rate_ratio is not None) + max(1, len(bool_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(9.8, 0.7 + 0.95 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_idx = 0
+
+    range_result = get_range(ulog, base_timestamp)
+    if range_result is not None:
+        t_range, range_m = range_result
+        axes[axis_idx].plot(
+            t_range, range_m, lw=0.9, color="tab:blue", label="distance_sensor.current_distance"
+        )
+    if lpos is not None and "dist_bottom" in lpos.data:
+        t_lpos = t_rel(lpos, base_timestamp)
+        axes[axis_idx].plot(
+            t_lpos,
+            arr(lpos, "dist_bottom"),
+            lw=0.8,
+            color="tab:green",
+            label="vehicle_local_position.dist_bottom",
+        )
+    if not axes[axis_idx].has_data():
+        plot_unavailable(
+            axes[axis_idx], "distance_sensor.current_distance / dist_bottom not logged"
+        )
+    setup_axis(axes[axis_idx], "Range finder and EKF HAGL estimate", "m")
+    axis_idx += 1
+
+    if dist is not None:
+        t_dist = t_rel(dist, base_timestamp)
+        for field, color in [("signal_quality", "tab:blue"), ("variance", "tab:orange")]:
+            if field in dist.data:
+                axes[axis_idx].plot(
+                    t_dist, arr(dist, field), lw=0.9, color=color, label=f"distance_sensor.{field}"
+                )
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "distance_sensor quality fields not logged")
+    setup_axis(axes[axis_idx], "Range finder signal quality / variance", "logged units")
+    axis_idx += 1
+
+    axes[axis_idx].axhline(1.0, color="black", lw=0.9, ls="--", label="gate (1.0)")
+    if range_ratio is not None:
+        axes[axis_idx].plot(
+            range_ratio.t,
+            np.where(np.isfinite(range_ratio.values), range_ratio.values, np.nan),
+            lw=0.9,
+            color="tab:red",
+            label=range_ratio.source,
+        )
+        axes[axis_idx].set_yscale("symlog", linthresh=0.1)
+    else:
+        plot_unavailable(axes[axis_idx], "range height innovation test ratio not logged")
+    setup_axis(axes[axis_idx], "Range height innovation test ratio", "test ratio")
+    axis_idx += 1
+
+    if hagl_rate_ratio is not None:
+        axes[axis_idx].axhline(1.0, color="black", lw=0.9, ls="--", label="gate (1.0)")
+        axes[axis_idx].plot(
+            hagl_rate_ratio.t,
+            np.where(np.isfinite(hagl_rate_ratio.values), hagl_rate_ratio.values, np.nan),
+            lw=0.9,
+            color="tab:purple",
+            label=hagl_rate_ratio.source,
+        )
+        axes[axis_idx].set_yscale("symlog", linthresh=0.1)
+        setup_axis(axes[axis_idx], "HAGL rate innovation test ratio", "test ratio")
+        axis_idx += 1
+
+    if bool_fields:
+        for field, t, values, color in bool_fields:
+            plot_boolean_trace(
+                axes[axis_idx], t, values, f"Range finder status: {field}", color=color
+            )
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "range finder aid/event/rejection flags not logged")
+        setup_boolean_axis(axes[axis_idx], "Range finder aid/event/rejection flags")
+        axis_idx += 1
+    axes[axis_idx - 1].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "rangefinder_health")
+
+
+def plot_external_vision_health(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    odom = get_ds(ulog, "vehicle_visual_odometry")
+    events = get_ds(ulog, "estimator_event_flags")
+    ev_ratio_specs = ev_test_ratio_panel_specs(ulog)
+    bool_fields = []
+    if events is not None:
+        t_events = t_rel(events, base_timestamp)
+        for field, color in [
+            ("vision_data_stopped", "tab:red"),
+            ("starting_vision_pos_fusion", "tab:blue"),
+            ("starting_vision_vel_fusion", "tab:orange"),
+            ("starting_vision_yaw_fusion", "tab:green"),
+        ]:
+            if field in events.data:
+                bool_fields.append((field, t_events, arr(events, field, int), color))
+    nrows = 1 + max(1, len(ev_ratio_specs)) + max(1, len(bool_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(8.8, 0.7 + 0.9 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_idx = 0
+
+    if odom is not None:
+        t_odom = t_rel(odom, base_timestamp)
+        for field, color in [
+            ("quality", "tab:blue"),
+            ("pose_frame", "tab:orange"),
+            ("velocity_frame", "tab:green"),
+        ]:
+            if field in odom.data:
+                axes[axis_idx].plot(
+                    t_odom,
+                    arr(odom, field),
+                    lw=0.8,
+                    color=color,
+                    label=f"vehicle_visual_odometry.{field}",
+                )
+    if not axes[axis_idx].has_data():
+        plot_unavailable(axes[axis_idx], "vehicle_visual_odometry quality/frame fields not logged")
+    setup_axis(axes[axis_idx], "External-vision odometry quality / frames", "logged units")
+    axis_idx += 1
+
+    if ev_ratio_specs:
+        for topic, title, fields, label_prefix in ev_ratio_specs:
+            plot_ev_test_ratio_panel(
+                axes[axis_idx],
+                get_ds(ulog, topic),
+                base_timestamp,
+                title,
+                fields,
+                label_prefix,
+            )
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "external-vision aid-source test ratios not logged")
+        setup_axis(axes[axis_idx], "External-vision innovation test ratios", "test ratio")
+        axis_idx += 1
+
+    if bool_fields:
+        for field, t, values, color in bool_fields:
+            plot_boolean_trace(
+                axes[axis_idx], t, values, f"External-vision status: {field}", color=color
+            )
+            axis_idx += 1
+    else:
+        plot_unavailable(axes[axis_idx], "external-vision event flags not logged")
+        setup_boolean_axis(axes[axis_idx], "External-vision event flags")
+        axis_idx += 1
+    axes[axis_idx - 1].set_xlabel("flight-log relative time [s]")
+
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "external_vision_health")
+
+
+def plot_external_vision_position_comparison(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    odom = get_ds(ulog, "vehicle_visual_odometry")
+    local_position = get_ds(ulog, "vehicle_local_position")
+    fig, axes = plt.subplots(6, 1, figsize=(10.5, 9.8), sharex=True, constrained_layout=True)
+    axes = np.ravel(np.atleast_1d(axes))
+    axis_specs = [
+        ("X", "position[0]", "x", "tab:blue"),
+        ("Y", "position[1]", "y", "tab:green"),
+        ("Z", "position[2]", "z", "tab:purple"),
+    ]
+    t_odom = t_rel(odom, base_timestamp) if odom is not None else None
+    t_local = t_rel(local_position, base_timestamp) if local_position is not None else None
+
+    for idx, (axis_label, ev_field, local_field, color) in enumerate(axis_specs):
+        ax_value = axes[idx]
+        if (
+            local_position is not None
+            and local_field in local_position.data
+            and t_local is not None
+        ):
+            ax_value.plot(
+                t_local,
+                arr(local_position, local_field),
+                lw=1.0,
+                color=color,
+                label=f"vehicle_local_position.{local_field}",
+            )
+        else:
+            ax_value.text(
+                0.01,
+                0.90,
+                f"vehicle_local_position.{local_field} not logged",
+                transform=ax_value.transAxes,
+                fontsize=8,
+                color="tab:red",
+            )
+
+        if odom is not None and ev_field in odom.data and t_odom is not None:
+            ax_value.plot(
+                t_odom,
+                arr(odom, ev_field),
+                lw=0.8,
+                marker=".",
+                markersize=2.0,
+                color="tab:orange",
+                label=f"vehicle_visual_odometry.{ev_field}",
+            )
+        else:
+            ax_value.text(
+                0.01,
+                0.78,
+                f"vehicle_visual_odometry.{ev_field} not logged",
+                transform=ax_value.transAxes,
+                fontsize=8,
+                color="tab:red",
+            )
+        setup_axis(ax_value, f"Local position estimate vs EV {axis_label}", f"{axis_label} [m]")
+
+        ax_delta = axes[idx + 3]
+        delta = local_minus_ev_position_delta(
+            odom, local_position, base_timestamp, ev_field, local_field
+        )
+        if delta is not None and np.any(np.isfinite(delta[1])):
+            t_delta, values = delta
+            ax_delta.plot(t_delta, values, lw=0.9, color=color)
+            ax_delta.axhline(0.0, color="gray", lw=0.7, ls=":")
+        else:
+            ax_delta.text(
+                0.5,
+                0.5,
+                f"{axis_label} local - EV delta unavailable",
+                ha="center",
+                va="center",
+                transform=ax_delta.transAxes,
+            )
+        setup_axis(ax_delta, f"Local minus EV {axis_label}", "m")
+
+    axes[-1].set_xlabel("flight-log relative time [s]")
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    for ax in axes:
+        handles, _labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best", fontsize=7, ncols=2)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "external_vision_position_comparison")
+
+
+def plot_control_status_flags(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    flags = get_ds(ulog, "estimator_status_flags")
+    groups = control_status_flag_groups(flags)
+    nrows = max(1, len(groups))
+    height_ratios = [max(1.35, 0.34 * len(fields)) for _title, fields in groups] or [1.0]
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(4.0, 0.9 + sum(height_ratios))),
+        sharex=True,
+        constrained_layout=True,
+        gridspec_kw={"height_ratios": height_ratios},
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+
+    if not groups or flags is None:
+        plot_unavailable(axes[0], "estimator_status_flags.cs_* fields not logged")
+        setup_boolean_axis(axes[0], "Control statuses unavailable")
+    else:
+        t = t_rel(flags, base_timestamp)
+        for ax, (title, fields) in zip(axes, groups):
+            plot_boolean_group(ax, t, status_flag_series(flags, fields), title)
+
+    axes[-1].set_xlabel("flight-log relative time [s]")
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    add_system_time_axis(axes[-1], ulog, base_timestamp)
+    return save_fig(fig, fig_dir, "control_status_flags")
+
+
+def plot_reset_counters(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    status = get_ds(ulog, "estimator_status")
+    local_position = get_ds(ulog, "vehicle_local_position")
     reset_rows = reset_event_rows(ulog, base_timestamp)
-    fields = available_fields(status, _RESET_COUNTER_FIELDS)
-    nrows = max(1, len(fields))
+    series = [
+        ("estimator_status", status, field)
+        for field in available_fields(status, _RESET_COUNTER_FIELDS)
+    ] + [
+        ("vehicle_local_position", local_position, field)
+        for field in available_fields(local_position, _LOCAL_POSITION_RESET_COUNTER_FIELDS)
+    ]
+    nrows = max(1, len(series))
     fig, axes = plt.subplots(
         nrows,
         1,
@@ -1970,15 +4841,22 @@ def plot_reset_counters(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_mo
     )
     axes = np.ravel(np.atleast_1d(axes))
 
-    if not fields or status is None:
-        axes[0].text(0.5, 0.5, "estimator_status reset counters not logged", ha="center", va="center",
-                     transform=axes[0].transAxes)
+    if not series:
+        axes[0].text(
+            0.5,
+            0.5,
+            "estimator_status/vehicle_local_position reset counters not logged",
+            ha="center",
+            va="center",
+            transform=axes[0].transAxes,
+        )
         setup_axis(axes[0], "Reset counters unavailable", "count")
     else:
-        t = t_rel(status, base_timestamp)
-        for ax, key in zip(axes, fields):
-            values = arr(status, key, int)
-            ax.step(t, values, where="post", lw=1.0, color="tab:purple", label=key)
+        for ax, (source, ds, key) in zip(axes, series):
+            t = t_rel(ds, base_timestamp)
+            values = arr(ds, key, int)
+            label = f"{source}.{key}"
+            ax.step(t, values, where="post", lw=1.0, color="tab:purple", label=label)
             for row_idx, row in enumerate(reset_rows):
                 ax.axvline(
                     row.time_s,
@@ -1986,9 +4864,9 @@ def plot_reset_counters(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_mo
                     lw=0.9,
                     ls=":",
                     alpha=0.75,
-                    label="attitude/heading reset" if row_idx == 0 else None,
+                    label="logged reset event" if row_idx == 0 else None,
                 )
-            setup_axis(ax, key, "count")
+            setup_axis(ax, label, "count")
             setup_integer_value_axis(ax, values)
             ax.legend(loc="best", fontsize=7)
 
@@ -1997,44 +4875,165 @@ def plot_reset_counters(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_mo
     return save_fig(fig, fig_dir, "reset_counters")
 
 
-def plot_status_masks(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_status_mask_field(
+    ulog: ULog,
+    base_timestamp: int,
+    fig_dir: Path,
+    field: str,
+    title: str,
+    output_name: str,
+    shade_modes: bool = True,
+) -> Path:
     status = get_ds(ulog, "estimator_status")
-    fields = available_fields(status, _STATUS_MASK_FIELDS)
-    nrows = max(1, len(fields))
-    fig, axes = plt.subplots(
-        nrows,
+    fig, ax = plt.subplots(
         1,
-        figsize=(10.5, max(2.0, 0.85 + 0.72 * nrows)),
-        sharex=True,
+        1,
+        figsize=(10.5, 4.6),
         constrained_layout=True,
     )
-    axes = np.ravel(np.atleast_1d(axes))
 
-    if not fields or status is None:
-        axes[0].text(0.5, 0.5, "estimator_status masks not logged", ha="center", va="center",
-                     transform=axes[0].transAxes)
-        setup_axis(axes[0], "Status masks unavailable", "mask")
+    if status is None or field not in status.data:
+        plot_unavailable(ax, f"estimator_status.{field} not logged")
+        setup_boolean_axis(ax, title)
     else:
         t = t_rel(status, base_timestamp)
-        for ax, key in zip(axes, fields):
-            values = arr(status, key, int)
-            ax.step(t, values, where="post", lw=1.0, color="tab:blue", label=key)
-            setup_axis(ax, key, "raw mask")
-            setup_integer_value_axis(ax, values)
-            ax.legend(loc="best", fontsize=7)
+        values = arr(status, field, int)
+        observed = ", ".join(str(value) for value in sorted({int(value) for value in values}))
+        bits = active_bit_indices(values)
+        if bits:
+            colors = [
+                "tab:blue",
+                "tab:orange",
+                "tab:green",
+                "tab:red",
+                "tab:purple",
+                "tab:brown",
+                "tab:pink",
+            ]
+            series = [
+                (f"bit {bit}", t, ((values >> bit) & 1).astype(int), colors[index % len(colors)])
+                for index, bit in enumerate(bits)
+            ]
+            plot_boolean_group_sources(ax, series, title)
+        else:
+            ax.step(t, np.zeros(len(values), dtype=int), where="post", lw=1.0, color="tab:blue")
+            setup_boolean_axis(ax, title)
+            ax.text(
+                0.5,
+                0.52,
+                "logged; no active bits observed",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+        ax.text(
+            0.01,
+            0.98,
+            f"observed raw values: {observed if observed else 'none'}",
+            transform=ax.transAxes,
+            fontsize=8,
+            va="top",
+            bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.65, "lw": 0},
+        )
+
+    ax.set_xlabel("flight-log relative time [s]")
+    shade_mode_background(ax, ulog, base_timestamp, enabled=shade_modes)
+    add_system_time_axis(ax, ulog, base_timestamp)
+    return save_fig(fig, fig_dir, output_name)
+
+
+def plot_status_masks(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    status = get_ds(ulog, "estimator_status")
+    fields = [
+        ("control_mode_flags", "Control mode flags", "tab:blue"),
+        ("filter_fault_flags", "Filter fault flags", "tab:red"),
+        ("solution_status_flags", "Solution status flags", "tab:purple"),
+    ]
+    fig, axes = plt.subplots(3, 1, figsize=(10.5, 8.0), sharex=True, constrained_layout=True)
+    axes = np.ravel(np.atleast_1d(axes))
+
+    for ax, (field, title, color) in zip(axes, fields):
+        if status is None or field not in status.data:
+            plot_unavailable(ax, f"estimator_status.{field} not logged")
+            setup_axis(ax, title, "raw mask")
+            continue
+        t = t_rel(status, base_timestamp)
+        values = arr(status, field, int)
+        ax.step(t, values, where="post", lw=1.0, color=color, label=field)
+        observed = ", ".join(str(value) for value in sorted({int(value) for value in values}))
+        ax.text(
+            0.01,
+            0.98,
+            f"observed: {observed if observed else 'none'}",
+            transform=ax.transAxes,
+            fontsize=8,
+            va="top",
+            bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.65, "lw": 0},
+        )
+        setup_axis(ax, title, "raw mask")
+        setup_integer_value_axis(ax, values)
+        ax.legend(loc="best", fontsize=7)
 
     axes[-1].set_xlabel("flight-log relative time [s]")
     shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
     return save_fig(fig, fig_dir, "status_masks")
 
 
-def plot_innovation_check_flags(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_status_mask_bits_legacy(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    status = get_ds(ulog, "estimator_status")
+    bit_fields = []
+    if status is not None:
+        t = t_rel(status, base_timestamp)
+        for field in available_fields(status, _STATUS_MASK_FIELDS):
+            values = arr(status, field, int)
+            bits = active_bit_indices(values)
+            if not bits:
+                bit_fields.append((f"{field}: no active bits", t, np.zeros(len(values), dtype=int)))
+                continue
+            for bit in bits:
+                bit_fields.append((f"{field}: bit {bit}", t, ((values >> bit) & 1).astype(int)))
+    nrows = max(1, len(bit_fields))
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(10.5, max(3.0, 0.85 + 0.9 * nrows)),
+        sharex=True,
+        constrained_layout=True,
+    )
+    axes = np.ravel(np.atleast_1d(axes))
+
+    if not bit_fields or status is None:
+        axes[0].text(
+            0.5,
+            0.5,
+            "estimator_status masks not logged",
+            ha="center",
+            va="center",
+            transform=axes[0].transAxes,
+        )
+        setup_boolean_axis(axes[0], "Status masks unavailable")
+    else:
+        for ax, (label, t, values) in zip(axes, bit_fields):
+            plot_boolean_trace(ax, t, values, label, color="tab:blue")
+
+    axes[-1].set_xlabel("flight-log relative time [s]")
+    shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
+    return save_fig(fig, fig_dir, "status_mask_bits_legacy")
+
+
+def plot_innovation_check_flags(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     status = get_ds(ulog, "estimator_status")
     nrows = len(_INNOVATION_CHECK_FLAG_GROUPS)
     fig, axes = plt.subplots(
         nrows,
         1,
-        figsize=(10.5, max(2.4, 0.72 + 0.50 * nrows)),
+        figsize=(10.5, max(3.0, 0.72 + 1.0 * nrows)),
         sharex=True,
         constrained_layout=True,
     )
@@ -2042,26 +5041,35 @@ def plot_innovation_check_flags(ulog: ULog, base_timestamp: int, fig_dir: Path, 
 
     if status is None or "innovation_check_flags" not in status.data:
         for ax in axes:
-            ax.text(0.5, 0.5, "estimator_status.innovation_check_flags not logged",
-                    ha="center", va="center", transform=ax.transAxes)
+            ax.text(
+                0.5,
+                0.5,
+                "estimator_status.innovation_check_flags not logged",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
         setup_axis(axes[0], "Innovation check flags unavailable", "bit value")
     else:
         t = t_rel(status, base_timestamp)
         raw = arr(status, "innovation_check_flags", int)
         for ax, (label, bit_shift, mask) in zip(axes, _INNOVATION_CHECK_FLAG_GROUPS):
             values = innovation_check_flag_group_values(raw, bit_shift, mask)
-            ax.step(t, values, where="post", lw=1.0, color="tab:red", label=label)
-            ylabel = "0/1" if mask == 1 else f"0-{mask}"
-            setup_axis(ax, label, ylabel)
-            setup_integer_value_axis(ax, values)
-            ax.legend(loc="best", fontsize=7)
+            ax.step(t, values, where="post", lw=1.0, color="tab:red")
+            if mask == 1:
+                setup_boolean_axis(ax, label)
+            else:
+                setup_axis(ax, label, f"0-{mask}")
+                setup_integer_value_axis(ax, values)
 
     axes[-1].set_xlabel("flight-log relative time [s]")
     shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
     return save_fig(fig, fig_dir, "innovation_check_flags")
 
 
-def plot_estimator_event_flags(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_estimator_event_flags(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     event = get_ds(ulog, "estimator_event_flags")
     fields = []
     if event is not None:
@@ -2080,8 +5088,14 @@ def plot_estimator_event_flags(ulog: ULog, base_timestamp: int, fig_dir: Path, s
     axes = np.ravel(np.atleast_1d(axes))
 
     if not fields or event is None:
-        axes[0].text(0.5, 0.5, "no active estimator_event_flags booleans logged", ha="center", va="center",
-                     transform=axes[0].transAxes)
+        axes[0].text(
+            0.5,
+            0.5,
+            "no active estimator_event_flags booleans logged",
+            ha="center",
+            va="center",
+            transform=axes[0].transAxes,
+        )
         setup_boolean_axis(axes[0], "Estimator event flags")
     else:
         t = t_rel(event, base_timestamp)
@@ -2095,22 +5109,31 @@ def plot_estimator_event_flags(ulog: ULog, base_timestamp: int, fig_dir: Path, s
     return save_fig(fig, fig_dir, "estimator_event_flags")
 
 
-def plot_innovation_ratios(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
-    fig, axes = plt.subplots(5, 1, figsize=(10.5, 10.2), sharex=True, constrained_layout=True)
-
-    groups = [
-        (axes[0], ["gps_hvel[0]", "gps_hvel[1]", "gps_vvel"], "GPS velocity innovation test ratios"),
-        (axes[1], ["gps_hpos[0]", "gps_hpos[1]", "gps_vpos"], "GPS position innovation test ratios"),
-        (axes[2], ["baro_vpos"], "Baro vertical position innovation test ratio"),
-        (axes[3], ["rng_vpos"], "Range vertical position innovation test ratio"),
-        (axes[4], ["heading"], "Heading innovation test ratio"),
+def plot_innovation_ratios(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
+    channels = [
+        ("gps_hvel[0]", "GPS horizontal velocity innovation test ratio 0"),
+        ("gps_hvel[1]", "GPS horizontal velocity innovation test ratio 1"),
+        ("gps_vvel", "GPS vertical velocity innovation test ratio"),
+        ("gps_hpos[0]", "GPS horizontal position innovation test ratio 0"),
+        ("gps_hpos[1]", "GPS horizontal position innovation test ratio 1"),
+        ("gps_vpos", "GPS vertical position innovation test ratio"),
+        ("baro_vpos", "Baro vertical position innovation test ratio"),
+        ("rng_vpos", "Range vertical position innovation test ratio"),
+        ("heading", "Heading innovation test ratio"),
     ]
-    for ax, keys, title in groups:
-        for key in keys:
-            series = get_metric_series(ulog, base_timestamp, key, "test_ratio")
-            if series is not None:
-                y = np.where(np.isfinite(series.values), series.values, np.nan)
-                ax.plot(series.t, y, lw=0.9, label=series.source)
+    fig, axes = plt.subplots(
+        len(channels), 1, figsize=(10.5, 11.6), sharex=True, constrained_layout=True
+    )
+
+    for ax, (key, title) in zip(axes, channels):
+        series = get_metric_series(ulog, base_timestamp, key, "test_ratio")
+        if series is not None:
+            y = np.where(np.isfinite(series.values), series.values, np.nan)
+            ax.plot(series.t, y, lw=0.9, color="tab:blue")
+        else:
+            plot_unavailable(ax, f"{key} test ratio not logged")
         ax.axhline(1.0, color="black", lw=0.9, ls="--", label="gate")
         ax.axhline(0.36, color="gray", lw=0.7, ls=":", label="3 sigma equiv")
         setup_axis(ax, title, "test ratio")
@@ -2118,13 +5141,13 @@ def plot_innovation_ratios(ulog: ULog, base_timestamp: int, fig_dir: Path, shade
 
     axes[-1].set_xlabel("flight-log relative time [s]")
     shade_mode_background(axes, ulog, base_timestamp, enabled=shade_modes)
-    for ax in axes:
-        ax.legend(loc="best", fontsize=7, ncols=2)
 
     return save_fig(fig, fig_dir, "innovation_test_ratios")
 
 
-def plot_height_innovation_test_ratios(ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True) -> Path:
+def plot_height_innovation_test_ratios(
+    ulog: ULog, base_timestamp: int, fig_dir: Path, shade_modes: bool = True
+) -> Path:
     fig, axes = plt.subplots(4, 1, figsize=(10.5, 8.8), sharex=True)
     channels = [
         ("hagl", "HAGL innovation test ratio"),
@@ -2137,12 +5160,17 @@ def plot_height_innovation_test_ratios(ulog: ULog, base_timestamp: int, fig_dir:
         series = get_metric_series(ulog, base_timestamp, key, "test_ratio")
         ax.axhline(1.0, color="tab:red", lw=0.9, ls="--", label="test ratio gate 1.0")
         if series is None:
+            plot_unavailable(
+                ax,
+                f"{key} test ratio not logged; report does not compute this channel",
+            )
             setup_axis(ax, f"{title} missing", "ratio")
             ax.legend(loc="best", fontsize=7)
             continue
 
         y = np.where(np.isfinite(series.values), series.values, np.nan)
         ax.plot(series.t, y, lw=0.9, color="tab:blue", label=series.source)
+        ax.axhline(0.0, color="gray", lw=0.7, ls=":", label="zero")
         starts = exceedance_start_times(series.t, y, 1.0)
         for idx, start in enumerate(starts):
             ax.axvline(
@@ -2156,7 +5184,17 @@ def plot_height_innovation_test_ratios(ulog: ULog, base_timestamp: int, fig_dir:
         setup_axis(ax, title, "ratio")
         finite = y[np.isfinite(y)]
         y_max = max(1.2, float(np.nanmax(finite)) * 1.08) if finite.size else 1.2
-        ax.set_ylim(0.0, y_max)
+        ax.set_ylim(-0.03 * y_max, y_max)
+        if finite.size and np.nanmax(np.abs(finite)) <= 1e-12:
+            ax.text(
+                0.5,
+                0.2,
+                f"{key} is logged but all samples are zero",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=8,
+            )
         ax.legend(loc="best", fontsize=7, ncols=2)
 
     axes[-1].set_xlabel("flight-log relative time [s]")
@@ -2213,11 +5251,11 @@ def baro_metric_summary(
 
     baro_result = compute_baro_range_divergence(ulog, base_timestamp)
     if baro_result is None:
-        out["baro_truth_source"] = "no rangefinder — baro divergence not computed"
+        out["baro_reference_source"] = "no rangefinder — baro divergence not computed"
         return out
 
-    out["baro_truth_source"] = "rangefinder"
-    t_div, _baro_alt, divergence, offset = baro_result
+    out["baro_reference_source"] = "rangefinder"
+    _t_div, _baro_alt, divergence, offset = baro_result
 
     finite_div = divergence[np.isfinite(divergence)]
     if finite_div.size:
@@ -2225,7 +5263,9 @@ def baro_metric_summary(
         out["baro_range_max_divergence_m"] = f"{np.max(np.abs(finite_div)):.2f}"
         out["baro_range_rms_divergence_m"] = f"{np.sqrt(np.mean(finite_div**2)):.2f}"
 
-    pw_result = detect_propwash_events(ulog, base_timestamp, divergence_threshold_m, throttle_threshold)
+    pw_result = detect_propwash_events(
+        ulog, base_timestamp, divergence_threshold_m, throttle_threshold
+    )
     if pw_result is None:
         return out
     t_baro, pw_mask, _div = pw_result
@@ -2262,7 +5302,9 @@ def metric_summary(ulog: ULog, base_timestamp: int) -> dict[str, str]:
 
     if gps:
         gps_alt = gps_alt_m(gps)
-        out["gps_alt_drift_m"] = f"{gps_alt[-1] - gps_alt[0]:.1f} (informational only — not used as truth)"
+        out["gps_alt_drift_m"] = (
+            f"{gps_alt[-1] - gps_alt[0]:.1f} (informational only)"
+        )
         out["gps_quality_typical"] = (
             f"{np.nanmedian(arr(gps, 'satellites_used')):.0f} sats, "
             f"HDOP {np.nanmedian(arr(gps, 'hdop')):.2f}, "
@@ -2286,21 +5328,41 @@ def metric_summary(ulog: ULog, base_timestamp: int) -> dict[str, str]:
         out["local_vz_range"] = f"{np.nanmin(vz):.1f} to {np.nanmax(vz):.1f} m/s"
 
     if status:
-        for key in ["reset_count_vel_ne", "reset_count_vel_d", "reset_count_pos_ne",
-                    "reset_count_pod_d", "reset_count_quat"]:
+        for key in [
+            "reset_count_vel_ne",
+            "reset_count_vel_d",
+            "reset_count_pos_ne",
+            "reset_count_pod_d",
+            "reset_count_quat",
+        ]:
             if key in status.data:
                 values = arr(status, key, int)
                 out[key] = f"{values[0]}--{values[-1]}"
 
     if flags:
         t = t_rel(flags, base_timestamp)
-        for key in ["cs_gps", "cs_gnss_vel", "cs_gps_hgt", "cs_baro_hgt",
-                    "cs_rng_hgt", "fs_bad_acc_vertical", "cs_inertial_dead_reckoning"]:
+        for key in [
+            "cs_gps",
+            "cs_gnss_vel",
+            "cs_gps_hgt",
+            "cs_baro_hgt",
+            "cs_rng_hgt",
+            "fs_bad_acc_vertical",
+            "cs_inertial_dead_reckoning",
+        ]:
             if key in flags.data:
                 out[key] = format_spans(bool_spans(t, arr(flags, key, int)), limit=3)
 
-    for key in ["gps_vpos", "gps_vvel", "gps_hvel[0]", "gps_hvel[1]",
-                "gps_hpos[0]", "gps_hpos[1]", "baro_vpos", "rng_vpos"]:
+    for key in [
+        "gps_vpos",
+        "gps_vvel",
+        "gps_hvel[0]",
+        "gps_hvel[1]",
+        "gps_hpos[0]",
+        "gps_hpos[1]",
+        "baro_vpos",
+        "rng_vpos",
+    ]:
         series = get_metric_series(ulog, base_timestamp, key, "test_ratio")
         if series is not None:
             finite = series.values[np.isfinite(series.values)]
@@ -2314,7 +5376,9 @@ def metric_summary(ulog: ULog, base_timestamp: int) -> dict[str, str]:
         for key in ["check_fail_max_vert_spd_err", "check_fail_max_vert_err", "check_fail_gps_fix"]:
             if key in gps_status.data:
                 values = arr(gps_status, key, int).astype(bool)
-                out[key] = f"{int(values.sum())}/{values.size}; {format_spans(bool_spans(t, values), limit=3)}"
+                out[key] = (
+                    f"{int(values.sum())}/{values.size}; {format_spans(bool_spans(t, values), limit=3)}"
+                )
 
     return out
 
@@ -2336,8 +5400,41 @@ def latex_breakable_text(text: str) -> str:
     return escaped
 
 
+def latex_breakable_path(path: Path) -> str:
+    escaped = latex_breakable_text(path.as_posix())
+    for marker in ["/", " ", "-", "(", ")"]:
+        escaped = escaped.replace(marker, marker + r"\allowbreak{}")
+    return escaped
+
+
+def source_log_latex_line(config: ReviewConfig) -> str:
+    return rf"\noindent\textbf{{Source ULog:}} \texttt{{{latex_breakable_path(config.log.path)}}}"
+
+
 def latex_html_color(color: str) -> str:
     return color.strip().lstrip("#").upper()
+
+
+def status_latex_row_prefix(status: str) -> str:
+    normalized = status.strip().upper()
+    if normalized == "ENABLED":
+        return r"\rowcolor[HTML]{DFF0D8}"
+    if normalized == "DISABLED":
+        return r"\rowcolor[HTML]{F2DEDE}"
+    if normalized == "NOT LOGGED":
+        return r"\rowcolor[HTML]{EFEFEF}"
+    return ""
+
+
+def status_latex_text(status: str) -> str:
+    normalized = status.strip().upper()
+    if normalized == "ENABLED":
+        return r"\textbf{ENABLED}"
+    if normalized == "DISABLED":
+        return r"\textbf{DISABLED}"
+    if normalized == "NOT LOGGED":
+        return r"\texttt{not logged}"
+    return latex_escape(status)
 
 
 def fusion_state_latex_table(rows: list[FusionStateRow]) -> str:
@@ -2351,7 +5448,6 @@ def fusion_state_latex_table(rows: list[FusionStateRow]) -> str:
                 latex_escape(row.meaning),
                 f"{row.duration_s:.1f}",
                 f"{row.percent:.1f}\\%",
-                latex_escape(row.spans),
             ]
         )
         + r" \\"
@@ -2363,14 +5459,190 @@ def fusion_state_latex_table(rows: list[FusionStateRow]) -> str:
 \centering
 \scriptsize
 \resizebox{{\textwidth}}{{!}}{{%
-\begin{{tabular}}{{|l|l|r|r|l|}}
+\begin{{tabular}}{{|l|l|r|r|}}
 \hline
-Field & Literal meaning & Duration s & Armed \% & Spans \\
+Field & Literal meaning & Duration s & Armed \% \\
 \hline
 {body}
 \end{{tabular}}%
 }}
-\caption{{Active estimator fusion state from \texttt{{estimator\_status\_flags}}. Derived combined rows use OR logic; individual rows still show the underlying EKF mode split.}}
+\caption{{Active estimator fusion state from \texttt{{estimator\_status\_flags}}.
+Derived combined rows use OR logic; individual rows still show the underlying
+EKF mode split. Durations are accumulated over armed time.}}
+\end{{table}}"""
+
+
+def sensor_status_latex_table(rows: list[SensorStatusRow]) -> str:
+    if not rows:
+        return "No sensor availability or EKF control parameters were logged."
+
+    lines = []
+    for row in rows:
+        row_prefix = status_latex_row_prefix(row.status)
+        cells = [
+            latex_escape(row.sensor),
+            latex_escape(row.name),
+            latex_escape(row.value),
+            status_latex_text(row.status),
+        ]
+        prefix = f"{row_prefix}\n" if row_prefix else ""
+        lines.append(prefix + " & ".join(cells) + r" \\")
+        lines.append(r"\hline")
+    body = "\n".join(lines)
+
+    return rf"""\scriptsize
+\setlength{{\tabcolsep}}{{3pt}}
+\begin{{longtable}}{{|p{{0.20\textwidth}}|p{{0.31\textwidth}}|p{{0.18\textwidth}}|p{{0.21\textwidth}}|}}
+\caption{{Logged sensor availability bits and EKF sensor-control parameters.
+\texttt{{not logged}} means the value was absent from ULog
+\texttt{{initial\_parameters}}, not necessarily absent from firmware. Decoded
+bitmask details are shown inside the relevant sensor subsections.}}\\
+\hline
+Sensor & Parameter & Logged value & Interpreted status \\
+\hline
+\endfirsthead
+\hline
+Sensor & Parameter & Logged value & Interpreted status \\
+\hline
+\endhead
+\hline
+\multicolumn{{4}}{{|r|}}{{continued on next page}}\\
+\hline
+\endfoot
+\hline
+\endlastfoot
+{body}
+\end{{longtable}}
+\normalsize"""
+
+
+def parameter_bitmask_latex_table(rows: list[ParameterBitmaskRow], parameter: str) -> str:
+    parameter_rows = [row for row in rows if row.parameter == parameter]
+    if not parameter_rows:
+        return rf"No decoded \texttt{{{latex_escape(parameter)}}} rows were requested."
+
+    raw_value = parameter_rows[0].raw_value
+
+    body = "\n".join(
+        (f"{status_latex_row_prefix(row.status)}\n" if status_latex_row_prefix(row.status) else "")
+        + " & ".join([str(row.bit), status_latex_text(row.status), latex_escape(row.meaning)])
+        + r" \\"
+        + "\n\\hline"
+        for row in parameter_rows
+    )
+
+    return rf"""\begin{{table}}[H]
+\centering
+\scriptsize
+\begin{{tabular}}{{|r|p{{0.18\textwidth}}|p{{0.62\textwidth}}|}}
+\hline
+Bit & Status & Meaning \\
+\hline
+{body}
+\end{{tabular}}
+\caption{{Decoded \texttt{{{latex_escape(parameter)}}} bitmask from ULog
+\texttt{{initial\_parameters}}. Logged raw value: \texttt{{{latex_escape(raw_value)}}}.}}
+\end{{table}}"""
+
+
+def parameter_enum_latex_table(rows: list[ParameterEnumRow], parameter: str) -> str:
+    parameter_rows = [row for row in rows if row.parameter == parameter]
+    if not parameter_rows:
+        return rf"No decoded \texttt{{{latex_escape(parameter)}}} rows were requested."
+
+    raw_value = parameter_rows[0].raw_value
+    body = "\n".join(
+        (f"{status_latex_row_prefix(row.status)}\n" if status_latex_row_prefix(row.status) else "")
+        + " & ".join(
+            [
+                str(row.value),
+                r"\textbf{yes}" if row.selected else "no",
+                status_latex_text(row.status),
+                latex_escape(row.meaning),
+            ]
+        )
+        + r" \\"
+        + "\n\\hline"
+        for row in parameter_rows
+    )
+
+    return rf"""\begin{{table}}[H]
+\centering
+\scriptsize
+\begin{{tabular}}{{|r|p{{0.13\textwidth}}|p{{0.18\textwidth}}|p{{0.52\textwidth}}|}}
+\hline
+Value & Selected & Status & Meaning \\
+\hline
+{body}
+\end{{tabular}}
+\caption{{Decoded \texttt{{{latex_escape(parameter)}}} enum from ULog
+\texttt{{initial\_parameters}}. Logged raw value: \texttt{{{latex_escape(raw_value)}}}.}}
+\end{{table}}"""
+
+
+def status_mask_latex_table(rows: list[StatusMaskRow]) -> str:
+    if not rows:
+        return "No \\texttt{estimator\\_status} mask fields were logged."
+
+    body = "\n".join(
+        " & ".join(
+            [
+                latex_escape(row.field),
+                latex_breakable_text(row.observed_values),
+                latex_escape(row.active_bits),
+            ]
+        )
+        + r" \\"
+        + "\n\\hline"
+        for row in rows
+    )
+
+    return rf"""\begin{{table}}[H]
+\centering
+\scriptsize
+\resizebox{{\textwidth}}{{!}}{{%
+\begin{{tabular}}{{|l|l|l|}}
+\hline
+Field & Observed raw values & Active bit rows plotted \\
+\hline
+{body}
+\end{{tabular}}%
+}}
+\caption{{Observed raw values and active bit rows for \texttt{{estimator\_status}}
+mask fields. These fields are bitmasks, not simple enum values.}}
+\end{{table}}"""
+
+
+def mpc_alt_mode_latex_table(summary: dict[str, str]) -> str:
+    rows = [
+        ("MPC_ALT_MODE", summary.get("mpc_alt_mode", "not logged")),
+        ("MPC_ALT_MODE label", summary.get("mpc_alt_mode_label", "unknown")),
+        ("Controller behavior", summary.get("mpc_alt_mode_detail", "unknown")),
+    ]
+    related = summary.get("mpc_alt_mode_related_params", "none logged")
+    for item in related.split(";"):
+        name, sep, value = item.strip().partition("=")
+        if sep:
+            rows.append((name.strip(), value.strip()))
+        elif item.strip() and item.strip() != "none logged":
+            rows.append(("Related parameter", item.strip()))
+
+    body = "\n".join(
+        " & ".join([latex_escape(name), latex_breakable_text(value)]) + r" \\" + "\n\\hline"
+        for name, value in rows
+    )
+
+    return rf"""\begin{{table}}[H]
+\centering
+\scriptsize
+\begin{{tabular}}{{|p{{0.30\textwidth}}|p{{0.62\textwidth}}|}}
+\hline
+Logged parameter or derived field & Value \\
+\hline
+{body}
+\end{{tabular}}
+\caption{{Logged \texttt{{MPC\_ALT\_MODE}} value and related altitude-hold
+parameters from ULog \texttt{{initial\_parameters}}.}}
 \end{{table}}"""
 
 
@@ -2514,50 +5786,61 @@ Value & Enum & PX4 description & Plot color \\
 
 def logged_parameter_latex_table(rows: list[ParameterRow]) -> str:
     if not rows:
-        return "No \\texttt{EKF2\\_*} or \\texttt{MPC\\_*} initial parameters were logged."
+        return (
+            "No \\texttt{EKF2\\_*}, \\texttt{MPC\\_*}, \\texttt{SENS\\_*}, "
+            "or \\texttt{SDLOG\\_*} initial parameters were logged."
+        )
 
     tables = []
-    for prefix in ["EKF2", "MPC"]:
+    for prefix in ["EKF2", "MPC", "SENS", "SDLOG"]:
         group_rows = [row for row in rows if row.prefix == prefix]
         if not group_rows:
             continue
 
-        body = "\n".join(
-            " & ".join(
-                [
-                    latex_escape(row.name),
-                    latex_escape(row.value),
-                ]
+        body_rows = []
+        for index in range(0, len(group_rows), 2):
+            left = group_rows[index]
+            right = group_rows[index + 1] if index + 1 < len(group_rows) else None
+            body_rows.append(
+                " & ".join(
+                    [
+                        latex_breakable_text(left.name),
+                        latex_breakable_text(left.value),
+                        latex_breakable_text(right.name) if right is not None else "",
+                        latex_breakable_text(right.value) if right is not None else "",
+                    ]
+                )
+                + r" \\"
+                + "\n\\hline"
             )
-            + r" \\"
-            + "\n\\hline"
-            for row in group_rows
-        )
+        body = "\n".join(body_rows)
 
         tables.append(
             rf"""\subsection*{{\texttt{{{prefix}\_*}}}}
-\scriptsize
-\setlength{{\tabcolsep}}{{4pt}}
+\fontsize{{11}}{{13}}\selectfont
+\setlength{{\tabcolsep}}{{3pt}}
+\renewcommand{{\arraystretch}}{{0.92}}
 \setlength{{\LTleft}}{{0pt}}
-\setlength{{\LTright}}{{\fill}}
-\begin{{longtable}}{{|p{{0.42\textwidth}}|p{{0.22\textwidth}}|}}
+\setlength{{\LTright}}{{0pt}}
+\begin{{longtable}}{{|p{{0.27\textwidth}}|p{{0.17\textwidth}}|p{{0.27\textwidth}}|p{{0.17\textwidth}}|}}
 \caption{{Logged \texttt{{{prefix}\_*}} ULog initial parameters ({len(group_rows)} rows). These are the values saved in the log; firmware-default comparison is not applied in this table.}}\\
 \hline
-Parameter & Logged value \\
+Parameter & Logged value & Parameter & Logged value \\
 \hline
 \endfirsthead
 \hline
-Parameter & Logged value \\
+Parameter & Logged value & Parameter & Logged value \\
 \hline
 \endhead
 \hline
-\multicolumn{{2}}{{|r|}}{{continued on next page}}\\
+\multicolumn{{4}}{{|r|}}{{continued on next page}}\\
 \hline
 \endfoot
 \hline
 \endlastfoot
 {body}
 \end{{longtable}}
+\renewcommand{{\arraystretch}}{{1.12}}
 \normalsize"""
         )
 
@@ -2568,39 +5851,39 @@ def build_latex(
     config: ReviewConfig,
     figures: dict[str, Path],
     summary: dict[str, str],
+    sensor_rows: list[SensorStatusRow],
+    bitmask_rows: list[ParameterBitmaskRow],
+    enum_rows: list[ParameterEnumRow],
     fusion_rows: list[FusionStateRow],
     reset_rows: list[ResetEventRow],
     exception_rows: list[EstimatorExceptionRow],
     nav_state_rows: list[NavStateRow],
     parameter_rows: list[ParameterRow],
 ) -> str:
-    rel_figures = {key: path.relative_to(config.output_dir).as_posix() for key, path in figures.items()}
-    log_title = latex_escape(config.log.title)
-
-    baro_truth = latex_escape(summary.get("baro_truth_source", "unknown"))
-    rangefinder_config = latex_breakable_text(summary.get("rangefinder_config", "unknown"))
-    baro_rms = latex_escape(summary.get("baro_range_rms_divergence_m", "n/a"))
-    baro_max = latex_escape(summary.get("baro_range_max_divergence_m", "n/a"))
-    pw_events = latex_escape(summary.get("baro_propwash_events", "n/a"))
-    pw_total = latex_escape(summary.get("baro_propwash_total_s", "n/a"))
+    rel_figures = {
+        key: path.relative_to(config.output_dir).as_posix() for key, path in figures.items()
+    }
+    sensor_table = sensor_status_latex_table(sensor_rows)
+    imu_ctrl_table = parameter_bitmask_latex_table(bitmask_rows, "EKF2_IMU_CTRL")
+    gps_ctrl_table = parameter_bitmask_latex_table(bitmask_rows, "EKF2_GPS_CTRL")
+    mag_check_table = parameter_bitmask_latex_table(bitmask_rows, "EKF2_MAG_CHECK")
+    gps_check_table = parameter_bitmask_latex_table(bitmask_rows, "EKF2_GPS_CHECK")
+    rng_ctrl_table = parameter_enum_latex_table(enum_rows, "EKF2_RNG_CTRL")
     fusion_table = fusion_state_latex_table(fusion_rows)
     reset_table = reset_event_latex_table(reset_rows)
     exception_table = estimator_exception_latex_table(exception_rows)
     nav_state_table = nav_state_latex_table(nav_state_rows)
     nav_state_color_key = nav_state_color_key_latex_table()
     parameter_table = logged_parameter_latex_table(parameter_rows)
-    has_rangefinder = summary.get("baro_truth_source") == "rangefinder"
+    mpc_alt_table = mpc_alt_mode_latex_table(summary)
+    source_log_line = source_log_latex_line(config)
+    has_rangefinder = summary.get("baro_reference_source") == "rangefinder"
     if has_rangefinder:
-        rangefinder_scope = (
-            "GPS altitude is shown in the GPS quality panel for informational context only; "
-            "it is not used as truth for rangefinder-based baro divergence."
-        )
-        baro_summary_items = rf"""\item \textbf{{Baro--rangefinder RMS divergence:}} {baro_rms}~m
-\item \textbf{{Baro--rangefinder max divergence:}} {baro_max}~m
-\item \textbf{{Propwash events (baro--rangefinder $>{latex_escape(f"{config.divergence_threshold_m:.2f}")}$~m while thrust $>{latex_escape(f"{config.throttle_threshold:.2f}")}$):}} {pw_events} events, {pw_total}~s"""
         altitude_caption = (
-            "EKF local altitude ($-z$), rangefinder AGL truth, and baro aligned to rangefinder. "
-            "GPS MSL shown as dotted reference only."
+            "EKF local altitude ($-z$), rangefinder AGL reference, and baro aligned to rangefinder. "
+            "GPS MSL shown as dotted reference only. The bottom panel compares the EKF HAGL "
+            "state from \\texttt{vehicle\\_local\\_position.dist\\_bottom} with derived terrain "
+            "state traces when logged."
         )
         propwash_intro = (
             rf"Propwash events (red spans) occur when $|\text{{baro}} - \text{{rangefinder}}| > "
@@ -2608,24 +5891,17 @@ def build_latex(
             rf"{latex_escape(f'{config.throttle_threshold:.2f}')}$."
         )
         propwash_caption = (
-            "Panel 1: altitude comparison using rangefinder as truth. "
+            "Panel 1: altitude comparison using the rangefinder as an AGL reference. "
             "Panel 2: baro$-$rangefinder divergence with threshold bands. "
             "Panel 3: normalized thrust. Panel 4: vehicle tilt. "
             "Panel 5: EKF baro height innovation ratio. Red spans are propwash events."
         )
     else:
-        rangefinder_scope = (
-            "No rangefinder truth source is logged. GPS altitude is shown for context only, "
-            "and rangefinder-based baro divergence/propwash scoring is not computed."
-        )
-        baro_summary_items = (
-            r"\item \textbf{Rangefinder baro divergence:} unavailable; no \texttt{distance\_sensor} topic"
-            "\n"
-            r"\item \textbf{Propwash events:} not computed without rangefinder truth"
-        )
         altitude_caption = (
             "EKF local altitude, baro altitude, and GPS MSL reference. "
-            "No \\texttt{distance\\_sensor} topic was logged."
+            "No \\texttt{distance\\_sensor} topic was logged. The bottom panel compares the EKF "
+            "HAGL state from \\texttt{vehicle\\_local\\_position.dist\\_bottom} with derived "
+            "terrain state traces when logged."
         )
         propwash_intro = (
             r"Rangefinder-based propwash scoring is unavailable because this log has no "
@@ -2642,12 +5918,9 @@ def build_latex(
     time_note = latex_escape(summary.get("system_time_note", "UTC system time status unknown."))
     terrain_dist_bottom = latex_escape(summary.get("terrain_dist_bottom", "not logged"))
     terrain_valid = latex_escape(summary.get("terrain_dist_bottom_valid", "not logged"))
-    terrain_bitfield = latex_escape(summary.get("terrain_dist_bottom_sensor_bitfield", "not logged"))
-    mpc_alt_mode = latex_escape(summary.get("mpc_alt_mode", "not logged"))
-    mpc_alt_label = latex_escape(summary.get("mpc_alt_mode_label", "unknown"))
-    mpc_alt_detail = latex_escape(summary.get("mpc_alt_mode_detail", "unknown"))
-    mpc_alt_related = latex_breakable_text(summary.get("mpc_alt_mode_related_params", "none logged"))
-
+    terrain_bitfield = latex_escape(
+        summary.get("terrain_dist_bottom_sensor_bitfield", "not logged")
+    )
     return rf"""\documentclass[10pt]{{article}}
 \usepackage[margin=0.7in]{{geometry}}
 \usepackage{{graphicx}}
@@ -2658,6 +5931,7 @@ def build_latex(
 \usepackage{{siunitx}}
 \usepackage{{caption}}
 \usepackage[table]{{xcolor}}
+\hypersetup{{hidelinks}}
 \setlength{{\parindent}}{{0pt}}
 \setlength{{\parskip}}{{0.5em}}
 \renewcommand{{\arraystretch}}{{1.12}}
@@ -2668,48 +5942,11 @@ def build_latex(
 
 \begin{{document}}
 \maketitle
+{source_log_line}
 
-\section{{Scope}}
-Single-log EKF2 analysis for \texttt{{{log_title}}}.
-Altitude truth source: \textbf{{{baro_truth}}}.
-Rangefinder evidence: {rangefinder_config}.
-{rangefinder_scope}
-Time-series plots use very light background shading for
-\texttt{{vehicle\_status.nav\_state}} when mode shading is enabled. The complete
-PX4 enum and color key are saved in the appendix.
+\tableofcontents
 
-\section{{High-Level Read}}
-\begin{{itemize}}
-{baro_summary_items}
-\item \textbf{{Rangefinder evidence:}} {rangefinder_config}
-\item \textbf{{EKF local-z range:}} {latex_escape(summary.get("local_z_range", "n/a"))}~m
-\item \textbf{{Baro height active:}} {latex_escape(summary.get("cs_baro_hgt", "n/a"))}
-\item \textbf{{Range height active:}} {latex_escape(summary.get("cs_rng_hgt", "n/a"))}
-\item \textbf{{Dead reckoning:}} {latex_escape(summary.get("cs_inertial_dead_reckoning", "none"))}
-\item \textbf{{Bad vertical accel:}} {latex_escape(summary.get("fs_bad_acc_vertical", "none"))}
-\item \textbf{{GPS quality:}} {latex_escape(summary.get("gps_quality_typical", "n/a"))}
-\end{{itemize}}
-
-\section{{Active Estimator Fusion State}}
-{fusion_table}
-
-\section{{Estimator Reset Events}}
-{reset_table}
-
-\section{{Estimator Health Exceptions}}
-{exception_table}
-
-\section{{MPC\_ALT\_MODE}}
-\begin{{itemize}}
-\item \textbf{{Logged value:}} \texttt{{{mpc_alt_mode}}} ({mpc_alt_label})
-\item \textbf{{Controller behavior:}} {mpc_alt_detail}
-\item \textbf{{Related logged parameters:}} {mpc_alt_related}
-\item \textbf{{Estimator distinction:}} \texttt{{MPC\_ALT\_MODE}} changes the multicopter
-position controller altitude reference behavior. It does not select the EKF height
-reference; that is reported separately through \texttt{{EKF2\_HGT\_REF}} and the
-active fusion flags such as \texttt{{cs\_baro\_hgt}} and \texttt{{cs\_rng\_hgt}}.
-\end{{itemize}}
-
+\clearpage
 \section{{Flight Mode Timeline}}
 Flight Review reports mode from the logged topic field
 \texttt{{vehicle\_status.nav\_state}}, not from a PX4 parameter in
@@ -2728,14 +5965,162 @@ background color bands are the same mode shading used on the other time-series
 plots.}}
 \end{{figure}}
 
+\clearpage
+\section{{Sensor Health}}
+{sensor_table}
+
+\subsection{{IMU Integrity}}
+\subsubsection*{{\texttt{{EKF2\_IMU\_CTRL}}}}
+{imu_ctrl_table}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["imu_health"]}}}
+\caption{{IMU health and integrity checks. The panels show logged vibration/coning
+metrics as separate vibration and coning traces, accelerometer and gyroscope
+clipping counters or masks, EKF IMU quality bits including
+\texttt{{fs\_bad\_acc\_vertical}} and
+\texttt{{fs\_bad\_acc\_clipping}}, and raw estimator health/fault masks.}}
+\end{{figure}}
+
+\clearpage
+\subsection{{Barometer Integrity}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["barometer_health"]}}}
+\caption{{Barometer health and fusion checks. The panels show baro altitude,
+logged pressure/temperature-style fields as separate traces when present, baro
+height innovation test ratio, and baro height fusion/timeout/reset status.
+Health is shown even when \texttt{{EKF2\_BARO\_CTRL}} is off or absent.}}
+\end{{figure}}
+
+{propwash_intro}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth]{{{rel_figures["baro_propwash"]}}}
+\caption{{{propwash_caption}}}
+\end{{figure}}
+
+\clearpage
+\subsection{{Magnetometer Integrity}}
+\subsubsection*{{\texttt{{EKF2\_MAG\_CHECK}}}}
+{mag_check_table}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["magnetometer_health"]}}}
+\caption{{Magnetometer health and integrity checks. The panels show logged mag
+components when available, heading innovation test ratio, and yaw rejection
+flags. Magnetometer control-status bits are collected in the Control Statuses
+section.}}
+\end{{figure}}
+
+\clearpage
+\subsection{{Attitude Overview}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["attitude_overview"]}}}
+\caption{{Attitude overview from \texttt{{vehicle\_attitude}},
+\texttt{{vehicle\_attitude\_setpoint}}, and
+\texttt{{vehicle\_angular\_velocity}} when logged. The horizontal-motion panel
+provides context for attitude and heading observability.}}
+\end{{figure}}
+
+\clearpage
+\subsection{{GPS / GNSS Integrity}}
+\subsubsection*{{\texttt{{EKF2\_GPS\_CTRL}}}}
+{gps_ctrl_table}
+
+\subsubsection*{{\texttt{{EKF2\_GPS\_CHECK}}}}
+{gps_check_table}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["quality"]}}}
+\caption{{{gps_caption}}}
+\end{{figure}}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["gps_checks"]}}}
+\caption{{GPS acceptance checks from \texttt{{estimator\_gps\_status}}. Each
+available check-failure field is plotted as its own 0/1 trace so \texttt{{max\_pdop}},
+speed, drift, and position checks remain readable.}}
+\end{{figure}}
+
+\clearpage
+\subsection{{Optical Flow Integrity}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["optical_flow_health"]}}}
+\caption{{Optical-flow health and integrity checks. The panels show sensor
+quality, raw \texttt{{vehicle\_optical\_flow.pixel\_flow}} axes, EKF
+aid-source innovation test ratios, aid-source fusion/rejection state when
+logged, optical-flow fault/rejection flags, and the EKF-fused optical-flow body
+velocity.
+\texttt{{cs\_opt\_flow}} is collected in the Control Statuses section.}}
+\end{{figure}}
+
+\clearpage
+\subsection{{Range Finder Integrity}}
+\subsubsection*{{\texttt{{EKF2\_RNG\_CTRL}}}}
+{rng_ctrl_table}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["rangefinder_health"]}}}
+\caption{{Range finder health and integrity checks.}}
+\end{{figure}}
+
+\clearpage
+\subsection{{External Vision Integrity}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["external_vision_position"]}}}
+\caption{{External-vision XYZ position measurements compared with the EKF local
+position estimate.}}
+\end{{figure}}
+
+\clearpage
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["external_vision_health"]}}}
+\caption{{External-vision health and integrity checks.}}
+\end{{figure}}
+
+\clearpage
+\section{{Sensor Latency}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]{{{rel_figures["sensor_latency"]}}}
+\caption{{Sensor sample-to-publication latency.}}
+\end{{figure}}
+
+\clearpage
+\section{{Active Estimator Fusion State}}
+{fusion_table}
+
+\section{{Estimator Reset Events}}
+{reset_table}
+
+\section{{Estimator Health Exceptions}}
+{exception_table}
+
+\section{{MPC\_ALT\_MODE}}
+{mpc_alt_table}
+\textbf{{Estimator distinction:}} \texttt{{MPC\_ALT\_MODE}} changes the multicopter
+position controller altitude reference behavior. It does not select the EKF height
+reference; that is reported separately through \texttt{{EKF2\_HGT\_REF}} and the
+control-status fields such as \texttt{{cs\_baro\_hgt}} and
+\texttt{{cs\_rng\_hgt}}, shown in the Control Statuses section.
+
 \section{{Terrain / HAGL Estimate}}
 \begin{{itemize}}
 \item \textbf{{Source field:}} \texttt{{vehicle\_local\_position.dist\_bottom}}
 \item \textbf{{Logged HAGL range:}} {terrain_dist_bottom}
 \item \textbf{{Valid spans:}} {terrain_valid}
 \item \textbf{{Source bitfield values:}} {terrain_bitfield}
-\item \textbf{{Range height fusion:}} {latex_escape(summary.get("cs_rng_hgt", "not logged"))}
-\item \textbf{{Range kinematically consistent:}} {latex_escape(summary.get("cs_rng_kin_consistent", "not logged"))}
 \end{{itemize}}
 
 \begin{{figure}}[H]
@@ -2744,10 +6129,9 @@ plots.}}
 \caption{{Terrain/HAGL estimate from \texttt{{vehicle\_local\_position}}. The
 first panel combines \texttt{{dist\_bottom}} with logged HAGL min/max bounds and
 the implied local terrain vertical position \texttt{{z + dist\_bottom}} when
-available. The remaining panels show separate 0/1 status traces for
-\texttt{{dist\_bottom\_valid}},
-\texttt{{dist\_bottom\_sensor\_bitfield != 0}}, \texttt{{cs\_rng\_hgt}}, and
-\texttt{{cs\_rng\_kin\_consistent}}.}}
+available. The remaining panels show \texttt{{dist\_bottom\_valid}} and
+\texttt{{dist\_bottom\_sensor\_bitfield != 0}}. EKF control-status bits are
+collected in the Control Statuses section.}}
 \end{{figure}}
 
 \section{{Altitude Overview}}
@@ -2781,6 +6165,23 @@ so positive vz is downward/descent. For user input context, Flight Review uses
 \end{{figure}}
 
 \clearpage
+\section{{PX4 Setpoint Diagnostics}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.90\textheight,keepaspectratio]{{{rel_figures["px4_setpoint_commands"]}}}
+\caption{{PX4 setpoint command diagnostics from trajectory, offboard-control, and
+local-position-setpoint topics.}}
+\end{{figure}}
+
+\clearpage
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.90\textheight,keepaspectratio]{{{rel_figures["px4_setpoint_response"]}}}
+\caption{{PX4 setpoint response diagnostics from local-position and
+attitude-setpoint topics.}}
+\end{{figure}}
+
+\clearpage
 \section{{Manual Control Inputs}}
 \begin{{figure}}[H]
 \centering
@@ -2789,6 +6190,24 @@ so positive vz is downward/descent. For user input context, Flight Review uses
 The normalized roll, pitch, yaw, and throttle channels show the commanded user
 inputs that can produce position-control setpoint changes. The boolean panels
 show \texttt{{sticks\_moving}} and \texttt{{valid}} when logged.}}
+\end{{figure}}
+
+\section{{Motor / Actuator / ESC Outputs}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth]{{{rel_figures["actuator_outputs"]}}}
+\caption{{Motor, actuator, and ESC output overview. The first panel prefers
+\texttt{{actuator\_motors.control[]}} when dynamic control allocation is logged,
+then falls back to varying \texttt{{actuator\_outputs.output[]}} channels. The
+second panel breaks out
+\texttt{{control\_allocator\_status.actuator\_saturation[]}} fields with
+\texttt{{ACTUATOR\_SATURATION\_OK}},
+\texttt{{ACTUATOR\_SATURATION\_UPPER\_DYN}},
+\texttt{{ACTUATOR\_SATURATION\_UPPER}},
+\texttt{{ACTUATOR\_SATURATION\_LOWER\_DYN}}, and
+\texttt{{ACTUATOR\_SATURATION\_LOWER}} state labels. The third panel shows
+normalized thrust when logged, and the fourth panel plots all logged ESC RPM
+channels from \texttt{{esc\_status.esc[i].esc\_rpm}} together.}}
 \end{{figure}}
 
 \section{{Local XY Position}}
@@ -2800,56 +6219,65 @@ start/end markers; the second and third panels show local x and local y as
 functions of flight-log relative time.}}
 \end{{figure}}
 
-\section{{Barometer / Propwash Analysis}}
-{propwash_intro}
-
+\section{{Control Statuses}}
 \begin{{figure}}[H]
 \centering
-\includegraphics[width=\textwidth]{{{rel_figures["baro_propwash"]}}}
-\caption{{{propwash_caption}}}
-\end{{figure}}
-
-\section{{GPS Quality (Informational)}}
-\begin{{figure}}[H]
-\centering
-\includegraphics[width=\textwidth]{{{rel_figures["quality"]}}}
-\caption{{{gps_caption}}}
-\end{{figure}}
-
-\section{{Fusion Flags}}
-\begin{{figure}}[H]
-\centering
-\includegraphics[width=\textwidth]{{{rel_figures["fusion_flags"]}}}
-\caption{{Estimator fusion and rejection flags from \texttt{{estimator\_status\_flags}}.
-Each field is plotted as its own 0/1 trace with no visual offsets.}}
+\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]{{{rel_figures["control_status_flags"]}}}
+\caption{{All logged \texttt{{estimator\_status\_flags.cs\_*}} control-status
+fields, grouped by subsystem. Each field is plotted as a stacked 0/1 trace.}}
 \end{{figure}}
 
 \section{{Reset Counters}}
 \begin{{figure}}[H]
 \centering
 \includegraphics[width=\textwidth]{{{rel_figures["reset_counters"]}}}
-\caption{{State reset counters from \texttt{{estimator\_status}}. Each counter is
-shown in its own subplot; red dotted lines mark attitude or heading reset events
-from \texttt{{vehicle\_attitude}} and \texttt{{vehicle\_local\_position}}.}}
+\caption{{State reset counters from \texttt{{estimator\_status}} and
+\texttt{{vehicle\_local\_position}}. Each counter is shown in its own subplot;
+red dotted lines mark logged reset-event counter increments.}}
 \end{{figure}}
 
 \section{{Estimator Status Masks}}
+The core \texttt{{estimator\_status}} masks are shown separately so control-mode
+state, filter faults, and solution status remain readable without a raw-value
+table. Each plot annotates the observed raw mask values.
+
 \begin{{figure}}[H]
 \centering
-\includegraphics[width=\textwidth]{{{rel_figures["status_masks"]}}}
-\caption{{Raw estimator status masks from \texttt{{estimator\_status}}, plotted
-separately with no offsets. The decoded \texttt{{innovation\_check\_flags}}
-groups are shown in the next section.}}
+\includegraphics[width=\textwidth]{{{rel_figures["control_mode_flags"]}}}
+\caption{{\texttt{{estimator\_status.control\_mode\_flags}} active observed bits.}}
+\end{{figure}}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth]{{{rel_figures["filter_fault_flags"]}}}
+\caption{{\texttt{{estimator\_status.filter\_fault\_flags}} active observed bits.}}
+\end{{figure}}
+
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth]{{{rel_figures["solution_status_flags"]}}}
+\caption{{\texttt{{estimator\_status.solution\_status\_flags}} active observed bits.}}
 \end{{figure}}
 
 \section{{Innovation Check Flags}}
 \begin{{figure}}[H]
 \centering
-\includegraphics[width=\textwidth]{{{rel_figures["innovation_check_flags"]}}}
+\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]{{{rel_figures["innovation_check_flags"]}}}
 \caption{{Decoded \texttt{{estimator\_status.innovation\_check\_flags}} using the
 same bit grouping Flight Review uses for velocity, horizontal position, vertical
 position, magnetometer, yaw, airspeed, synthetic sideslip, HAGL, and optical-flow
 checks. Multi-bit groups show the grouped integer value.}}
+\end{{figure}}
+
+\section{{Optical Flow Fusion Gating}}
+\begin{{figure}}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.84\textheight,keepaspectratio]{{{rel_figures["optical_flow_gating"]}}}
+\caption{{Optical-flow fusion gating diagnostics: normalized
+\texttt{{flow[0]}}/\texttt{{flow[1]}} test ratios, innovations against
+$\pm5\sigma$ gates, \texttt{{timestamp - time\_last\_fuse}} fusion delay,
+and logged fusion/rejection/fault status bits. Sensor latency is collected in
+the Sensor Latency section.}}
 \end{{figure}}
 
 \section{{Estimator Event Flags}}
@@ -2863,7 +6291,7 @@ event fields are omitted so persistent reset-source flags remain readable.}}
 \section{{Innovation Test Ratios}}
 \begin{{figure}}[H]
 \centering
-\includegraphics[width=\textwidth]{{{rel_figures["ratios"]}}}
+\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]{{{rel_figures["ratios"]}}}
 \caption{{Innovation test ratios. 1.0 is the configured gate; 0.36 is approximately 3-sigma with a 5-sigma gate.
 \texttt{{baro\_vpos}} and \texttt{{rng\_vpos}} are the key channels for baro compensation evaluation.}}
 \end{{figure}}
@@ -2873,9 +6301,11 @@ event fields are omitted so persistent reset-source flags remain readable.}}
 \centering
 \includegraphics[width=\textwidth]{{{rel_figures["height_ratios"]}}}
 \caption{{Height-related innovation test ratios for \texttt{{hagl}},
-\texttt{{hagl\_rate}}, \texttt{{baro\_vpos}}, and \texttt{{rng\_vpos}}. The
-horizontal red dashed line marks the 1.0 rejection gate; vertical red dotted
-lines mark upward crossings where the logged test ratio first exceeds 1.0.}}
+\texttt{{hagl\_rate}}, \texttt{{baro\_vpos}}, and \texttt{{rng\_vpos}}. These
+channels are plotted when logged; the report does not synthesize missing HAGL
+test ratios. All-zero logged channels are annotated explicitly. The horizontal
+red dashed line marks the 1.0 rejection gate; vertical red dotted lines mark
+upward crossings where the logged test ratio first exceeds 1.0.}}
 \end{{figure}}
 
 \section{{Residuals Versus Gates}}
@@ -2896,7 +6326,7 @@ lines mark upward crossings where the logged test ratio first exceeds 1.0.}}
 \section{{PX4 Navigation-State Color Key}}
 {nav_state_color_key}
 
-\section{{Logged EKF2 and MPC Parameters}}
+\section{{Logged EKF2, MPC, and SENS Parameters}}
 {parameter_table}
 
 \end{{document}}
@@ -2918,11 +6348,17 @@ def compile_latex(tex_path: Path) -> Path:
             "latexmk not found. Install a LaTeX distribution first "
             "(macOS: MacTeX or BasicTeX; Linux: latexmk plus a TeX Live package)."
         )
-    subprocess.run(
-        ["latexmk", "-pdf", "-interaction=nonstopmode", tex_path.name],
-        cwd=tex_path.parent,
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["latexmk", "-pdf", "-interaction=nonstopmode", tex_path.name],
+            cwd=tex_path.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        output = "\n".join(part for part in [exc.stdout, exc.stderr] if part)
+        raise RuntimeError(f"latexmk failed for {tex_path}:\n{output}") from exc
     pdf_path = tex_path.with_suffix(".pdf")
     if not pdf_path.exists():
         raise FileNotFoundError(f"latexmk completed but did not produce {pdf_path}")
@@ -2942,47 +6378,139 @@ def generate_review(config: ReviewConfig) -> ReviewArtifacts:
     base_timestamp = ulog.start_timestamp
 
     figures = {
-        "position": plot_position_overview(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
-        "local_xy": plot_local_xy_position(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
-        "nav_state": plot_nav_state_timeline(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
+        "position": plot_position_overview(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "local_xy": plot_local_xy_position(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "nav_state": plot_nav_state_timeline(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
         "position_tracking": plot_position_tracking(
             ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
         ),
         "velocity_tracking": plot_velocity_tracking(
             ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
         ),
+        "px4_setpoint_commands": plot_px4_setpoint_commands(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "px4_setpoint_response": plot_px4_setpoint_response(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
         "manual_control": plot_manual_control_inputs(
             ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
         ),
-        "terrain": plot_terrain_estimate(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
+        "attitude_overview": plot_attitude_overview(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "actuator_outputs": plot_actuator_outputs(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "terrain": plot_terrain_estimate(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "sensor_latency": plot_sensor_latency(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "imu_health": plot_imu_health(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "barometer_health": plot_barometer_health(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "magnetometer_health": plot_magnetometer_health(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "optical_flow_health": plot_optical_flow_sensor_health(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "rangefinder_health": plot_rangefinder_health(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "external_vision_position": plot_external_vision_position_comparison(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "external_vision_health": plot_external_vision_health(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
         "baro_propwash": plot_baro_propwash(
-            ulog, base_timestamp, fig_dir,
+            ulog,
+            base_timestamp,
+            fig_dir,
             divergence_threshold_m=config.divergence_threshold_m,
             throttle_threshold=config.throttle_threshold,
             hover_max_speed_ms=config.hover_max_speed_ms,
             shade_modes=config.shade_flight_modes,
         ),
-        "quality": plot_gps_quality(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
-        "fusion_flags": plot_fusion_flags(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
-        "reset_counters": plot_reset_counters(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
-        "status_masks": plot_status_masks(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
+        "quality": plot_gps_quality(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "gps_checks": plot_gps_checks(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "control_status_flags": plot_control_status_flags(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "reset_counters": plot_reset_counters(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "control_mode_flags": plot_status_mask_field(
+            ulog,
+            base_timestamp,
+            fig_dir,
+            field="control_mode_flags",
+            title="Control mode flags",
+            output_name="control_mode_flags",
+            shade_modes=config.shade_flight_modes,
+        ),
+        "filter_fault_flags": plot_status_mask_field(
+            ulog,
+            base_timestamp,
+            fig_dir,
+            field="filter_fault_flags",
+            title="Filter fault flags",
+            output_name="filter_fault_flags",
+            shade_modes=config.shade_flight_modes,
+        ),
+        "solution_status_flags": plot_status_mask_field(
+            ulog,
+            base_timestamp,
+            fig_dir,
+            field="solution_status_flags",
+            title="Solution status flags",
+            output_name="solution_status_flags",
+            shade_modes=config.shade_flight_modes,
+        ),
         "innovation_check_flags": plot_innovation_check_flags(
             ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
         ),
-        "event_flags": plot_estimator_event_flags(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
-        "ratios": plot_innovation_ratios(ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes),
+        "optical_flow_gating": plot_optical_flow_fusion_gating(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "event_flags": plot_estimator_event_flags(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
+        "ratios": plot_innovation_ratios(
+            ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
+        ),
         "height_ratios": plot_height_innovation_test_ratios(
             ulog, base_timestamp, fig_dir, shade_modes=config.shade_flight_modes
         ),
         "vertical_residuals": plot_residuals(
-            ulog, base_timestamp, fig_dir,
+            ulog,
+            base_timestamp,
+            fig_dir,
             keys=["baro_vpos", "rng_vpos", "gps_vpos", "gps_vvel"],
             name="vertical_residual_thresholds",
             title_prefix="Vertical",
             shade_modes=config.shade_flight_modes,
         ),
         "horizontal_residuals": plot_residuals(
-            ulog, base_timestamp, fig_dir,
+            ulog,
+            base_timestamp,
+            fig_dir,
             keys=["gps_hpos[0]", "gps_hpos[1]", "gps_hvel[0]", "gps_hvel[1]"],
             name="horizontal_residual_thresholds",
             title_prefix="Horizontal GPS",
@@ -2995,12 +6523,16 @@ def generate_review(config: ReviewConfig) -> ReviewArtifacts:
         "system_time_note": system_time_note(ulog, base_timestamp),
         **terrain_estimate_summary(ulog, base_timestamp),
         **baro_metric_summary(
-            ulog, base_timestamp,
+            ulog,
+            base_timestamp,
             divergence_threshold_m=config.divergence_threshold_m,
             throttle_threshold=config.throttle_threshold,
             hover_max_speed_ms=config.hover_max_speed_ms,
         ),
     }
+    sensor_rows = sensor_status_rows(ulog)
+    bitmask_rows = parameter_bitmask_rows(ulog)
+    enum_rows = parameter_enum_rows(ulog)
     fusion_rows = active_fusion_state_rows(ulog, base_timestamp)
     reset_rows = reset_event_rows(ulog, base_timestamp)
     exception_rows = estimator_exception_rows(ulog, base_timestamp)
@@ -3013,6 +6545,9 @@ def generate_review(config: ReviewConfig) -> ReviewArtifacts:
         config,
         figures,
         summary,
+        sensor_rows,
+        bitmask_rows,
+        enum_rows,
         fusion_rows,
         reset_rows,
         exception_rows,

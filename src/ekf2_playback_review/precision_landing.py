@@ -24,10 +24,14 @@ from .analysis import (
     bool_spans,
     compile_latex,
     get_ds,
-    get_thrust,
     get_range,
+    get_thrust,
+    measurement_latency_s,
+    plot_optical_flow_measurement_counts,
+    plot_unavailable,
     save_fig,
     setup_axis,
+    setup_latency_axis,
     t_rel,
 )
 
@@ -85,6 +89,7 @@ class PLWindow(NamedTuple):
 # Replay check
 # ---------------------------------------------------------------------------
 
+
 def check_ekf2_replay(ulog: ULog) -> tuple[bool, str]:
     """Return (is_replay, human-readable note)."""
     topic_names = {d.name for d in ulog.data_list}
@@ -99,6 +104,7 @@ def check_ekf2_replay(ulog: ULog) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Timeline helpers
 # ---------------------------------------------------------------------------
+
 
 def nav_state_transitions(ulog: ULog, base_timestamp: int) -> list[tuple[float, int, str]]:
     vs = get_ds(ulog, "vehicle_status")
@@ -115,7 +121,9 @@ def nav_state_transitions(ulog: ULog, base_timestamp: int) -> list[tuple[float, 
     return transitions
 
 
-def detect_pl_windows(ulog: ULog, base_timestamp: int, min_duration_s: float = 2.0) -> list[PLWindow]:
+def detect_pl_windows(
+    ulog: ULog, base_timestamp: int, min_duration_s: float = 2.0
+) -> list[PLWindow]:
     """Return time windows where a landing-capable nav state was active."""
     vs = get_ds(ulog, "vehicle_status")
     if vs is None:
@@ -151,24 +159,22 @@ def detect_pl_windows(ulog: ULog, base_timestamp: int, min_duration_s: float = 2
 # ---------------------------------------------------------------------------
 
 _MODE_COLORS: dict[int, str] = {
-    0:  "tab:gray",     # MANUAL
-    1:  "tab:cyan",     # ALTCTL
-    2:  "tab:blue",     # POSCTL
-    3:  "tab:purple",   # MISSION
-    4:  "tab:green",    # LOITER
-    5:  "gold",         # RTL
-    10: "tab:brown",    # ACRO
-    14: "tab:orange",   # OFFBOARD
-    15: "tab:olive",    # STAB
-    17: "tab:pink",     # TAKEOFF
-    18: "tab:red",      # AUTO_LAND
-    20: "crimson",      # AUTO_PRECLAND
+    0: "tab:gray",  # MANUAL
+    1: "tab:cyan",  # ALTCTL
+    2: "tab:blue",  # POSCTL
+    3: "tab:purple",  # MISSION
+    4: "tab:green",  # LOITER
+    5: "gold",  # RTL
+    10: "tab:brown",  # ACRO
+    14: "tab:orange",  # OFFBOARD
+    15: "tab:olive",  # STAB
+    17: "tab:pink",  # TAKEOFF
+    18: "tab:red",  # AUTO_LAND
+    20: "crimson",  # AUTO_PRECLAND
 }
 
 
-def _mode_spans(
-    ulog: ULog, base_timestamp: int
-) -> list[tuple[float, float, int, str]]:
+def _mode_spans(ulog: ULog, base_timestamp: int) -> list[tuple[float, float, int, str]]:
     """Return (t_start, t_end, nav_state, name) for every contiguous mode segment."""
     vs = get_ds(ulog, "vehicle_status")
     if vs is None:
@@ -197,7 +203,10 @@ def plot_mode_timeline(
     ld = get_ds(ulog, "vehicle_land_detected")
 
     fig, (ax_mode, ax_agl) = plt.subplots(
-        2, 1, figsize=(13, 5), sharex=True,
+        2,
+        1,
+        figsize=(13, 5),
+        sharex=True,
         gridspec_kw={"height_ratios": [1, 2]},
     )
     fig.suptitle("Vehicle mode transitions", fontsize=10)
@@ -209,19 +218,30 @@ def plot_mode_timeline(
         color = _MODE_COLORS.get(state, "tab:gray")
         label = name if state not in seen else None
         ax_mode.barh(
-            0, t1 - t0, left=t0, height=bar_h,
-            color=color, edgecolor="white", linewidth=0.5,
-            label=label, align="center",
+            0,
+            t1 - t0,
+            left=t0,
+            height=bar_h,
+            color=color,
+            edgecolor="white",
+            linewidth=0.5,
+            label=label,
+            align="center",
         )
         seen.add(state)
         dur = t1 - t0
         # annotate if wide enough to fit text (>1s visible space)
         if dur > 1.0:
             ax_mode.text(
-                t0 + dur / 2, 0, f"{name}\n{dur:.1f}s",
-                ha="center", va="center", fontsize=7,
-                fontweight="bold", color="white",
-                bbox=dict(boxstyle="round,pad=0.1", fc="none", ec="none"),
+                t0 + dur / 2,
+                0,
+                f"{name}\n{dur:.1f}s",
+                ha="center",
+                va="center",
+                fontsize=7,
+                fontweight="bold",
+                color="white",
+                bbox={"boxstyle": "round,pad=0.1", "fc": "none", "ec": "none"},
             )
         else:
             # narrow band: label above with arrow
@@ -229,8 +249,10 @@ def plot_mode_timeline(
                 f"{name}\n{dur:.2f}s",
                 xy=(t0 + dur / 2, bar_h / 2),
                 xytext=(t0 + dur / 2, 1.1),
-                fontsize=6, ha="center", color=color,
-                arrowprops=dict(arrowstyle="-", color=color, lw=0.8),
+                fontsize=6,
+                ha="center",
+                color=color,
+                arrowprops={"arrowstyle": "-", "color": color, "lw": 0.8},
             )
 
     ax_mode.set_yticks([])
@@ -247,7 +269,13 @@ def plot_mode_timeline(
         t_ld = t_rel(ld, base_timestamp)
         landed = arr(ld, "landed", dtype=int)
         for s, e in bool_spans(t_ld, landed):
-            ax_agl.axvspan(s, e, color="green", alpha=0.18, label="landed" if s == bool_spans(t_ld, landed)[0][0] else "")
+            ax_agl.axvspan(
+                s,
+                e,
+                color="green",
+                alpha=0.18,
+                label="landed" if s == bool_spans(t_ld, landed)[0][0] else "",
+            )
 
     # vertical lines at every mode transition
     for t0, t1, state, name in spans[1:]:  # skip the first (no left edge)
@@ -270,6 +298,7 @@ def plot_mode_timeline(
 # Plot: flight overview — nav state, altitude, land detection
 # ---------------------------------------------------------------------------
 
+
 def plot_flight_overview(
     ulog: ULog,
     base_timestamp: int,
@@ -287,7 +316,7 @@ def plot_flight_overview(
     # panel 1: AGL altitude (rangefinder preferred; EKF -z fallback)
     if range_result is not None:
         t_r, r_m = range_result
-        axes[0].plot(t_r, r_m, lw=1.2, color="tab:blue", label="rangefinder AGL (truth)")
+        axes[0].plot(t_r, r_m, lw=1.2, color="tab:blue", label="rangefinder AGL")
     if lpos is not None:
         t_lp = t_rel(lpos, base_timestamp)
         ekf_z = arr(lpos, "z")
@@ -320,13 +349,28 @@ def plot_flight_overview(
         # annotate state labels
         transitions = nav_state_transitions(ulog, base_timestamp)
         for ti, n, name in transitions:
-            axes[3].annotate(name, (ti, n), fontsize=6, rotation=45,
-                             xytext=(2, 4), textcoords="offset points", color="tab:purple")
+            axes[3].annotate(
+                name,
+                (ti, n),
+                fontsize=6,
+                rotation=45,
+                xytext=(2, 4),
+                textcoords="offset points",
+                color="tab:purple",
+            )
     if ld is not None:
         t_ld = t_rel(ld, base_timestamp)
         landed = arr(ld, "landed", dtype=int)
-        axes[3].step(t_ld, landed * 30, where="post", lw=1.5, color="black",
-                     ls="--", alpha=0.5, label="landed×30")
+        axes[3].step(
+            t_ld,
+            landed * 30,
+            where="post",
+            lw=1.5,
+            color="black",
+            ls="--",
+            alpha=0.5,
+            label="landed×30",
+        )
     setup_axis(axes[3], "Nav state (raw int) + land-detected (scaled)", "")
     axes[3].set_xlabel("flight-log relative time [s]")
 
@@ -343,6 +387,7 @@ def plot_flight_overview(
 # Plot: optical flow health
 # ---------------------------------------------------------------------------
 
+
 def plot_optical_flow_health(
     ulog: ULog,
     base_timestamp: int,
@@ -353,7 +398,7 @@ def plot_optical_flow_health(
     vof = get_ds(ulog, "vehicle_optical_flow")
     of_vel = get_ds(ulog, "estimator_optical_flow_vel")
 
-    fig, axes = plt.subplots(4, 1, figsize=(11, 10), sharex=True)
+    fig, axes = plt.subplots(7, 1, figsize=(11, 13), sharex=True)
 
     # panel 1: sensor quality
     if vof is not None and "quality" in vof.data:
@@ -364,7 +409,35 @@ def plot_optical_flow_health(
         axes[0].set_ylim(0, 270)
     setup_axis(axes[0], "Optical flow sensor quality", "")
 
-    # panel 2: EKF innovation test ratios (gate = 1.0)
+    # panel 2: raw and EKF-input measurement counts
+    plot_optical_flow_measurement_counts(axes[1], ulog, base_timestamp)
+
+    # panel 3: sample-to-publication latency
+    latency_result = measurement_latency_s(vof, base_timestamp)
+    if latency_result is not None and np.any(np.isfinite(latency_result[1])):
+        t_latency, latency_s, source_field = latency_result
+        latency_ms = latency_s * 1e3
+        axes[2].plot(t_latency, latency_ms, lw=0.9, color="tab:purple")
+        setup_latency_axis(axes[2], latency_ms)
+        latency_title = f"Optical flow sample-to-publication latency ({source_field})"
+    else:
+        plot_unavailable(axes[2], "vehicle_optical_flow.timestamp_sample not logged")
+        latency_title = "Optical flow sample-to-publication latency"
+    setup_axis(axes[2], latency_title, "ms")
+
+    # panel 4: raw optical-flow pixel flow
+    if vof is not None:
+        t_vof = t_rel(vof, base_timestamp)
+        for field, color, label in [
+            ("pixel_flow[0]", "tab:blue", "pixel_flow[0]"),
+            ("pixel_flow[1]", "tab:orange", "pixel_flow[1]"),
+        ]:
+            if field in vof.data:
+                axes[3].plot(t_vof, arr(vof, field), lw=0.9, color=color, label=label)
+        axes[3].axhline(0, color="gray", lw=0.6, ls=":")
+    setup_axis(axes[3], "Optical flow pixel flow", "rad")
+
+    # panel 5: EKF innovation test ratios (gate = 1.0)
     if aid is not None:
         t_aid = t_rel(aid, base_timestamp)
         for i, color in [(0, "tab:orange"), (1, "tab:red")]:
@@ -372,23 +445,25 @@ def plot_optical_flow_health(
             if key in aid.data:
                 y = arr(aid, key)
                 y = np.where(np.isfinite(y), y, np.nan)
-                axes[1].plot(t_aid, y, lw=0.9, color=color, label=f"test_ratio[{i}]")
-        axes[1].axhline(1.0, color="black", lw=1.0, ls="--", label="gate (1.0)")
-        axes[1].set_yscale("symlog", linthresh=0.05)
-    setup_axis(axes[1], "EKF OF innovation test ratios (>1 = rejected)", "ratio")
+                axes[4].plot(t_aid, y, lw=0.9, color=color, label=f"test_ratio[{i}]")
+        axes[4].axhline(1.0, color="black", lw=1.0, ls="--", label="gate (1.0)")
+        axes[4].set_yscale("symlog", linthresh=0.05)
+    setup_axis(axes[4], "EKF OF innovation test ratios (>1 = rejected)", "ratio")
 
-    # panel 3: fusion stall indicator (time_last_fuse stops changing)
+    # panel 6: fusion stall indicator (time_last_fuse stops changing)
     if aid is not None and "time_last_fuse" in aid.data:
         t_aid = t_rel(aid, base_timestamp)
         fuse_t = arr(aid, "time_last_fuse", dtype=float)
         stall = np.zeros(len(fuse_t), dtype=float)
         for i in range(1, len(fuse_t)):
             stall[i] = 1.0 if fuse_t[i] == fuse_t[i - 1] else 0.0
-        axes[2].fill_between(t_aid, stall, step="post", color="tab:red", alpha=0.6, label="fusion stalled")
-        axes[2].set_ylim(-0.1, 1.3)
-    setup_axis(axes[2], "OF fusion stall (EKF stopped fusing)", "")
+        axes[5].fill_between(
+            t_aid, stall, step="post", color="tab:red", alpha=0.6, label="fusion stalled"
+        )
+        axes[5].set_ylim(-0.1, 1.3)
+    setup_axis(axes[5], "OF fusion stall (EKF stopped fusing)", "")
 
-    # panel 4: EKF-fused body velocity from optical flow
+    # panel 7: EKF-fused body velocity from optical flow
     if of_vel is not None:
         t_vel = t_rel(of_vel, base_timestamp)
         for field, color, label in [
@@ -396,10 +471,10 @@ def plot_optical_flow_health(
             ("vel_body[1]", "tab:orange", "fused vy body"),
         ]:
             if field in of_vel.data:
-                axes[3].plot(t_vel, arr(of_vel, field), lw=0.9, color=color, label=label)
-        axes[3].axhline(0, color="gray", lw=0.6, ls=":")
-    setup_axis(axes[3], "EKF optical-flow fused body velocity", "m/s")
-    axes[3].set_xlabel("flight-log relative time [s]")
+                axes[6].plot(t_vel, arr(of_vel, field), lw=0.9, color=color, label=label)
+        axes[6].axhline(0, color="gray", lw=0.6, ls=":")
+    setup_axis(axes[6], "EKF optical-flow fused body velocity", "m/s")
+    axes[6].set_xlabel("flight-log relative time [s]")
 
     _shade_windows(axes, pl_windows)
 
@@ -412,6 +487,7 @@ def plot_optical_flow_health(
 # ---------------------------------------------------------------------------
 # Plot: close-up of each PL window
 # ---------------------------------------------------------------------------
+
 
 def plot_pl_closeup(
     ulog: ULog,
@@ -441,7 +517,9 @@ def plot_pl_closeup(
         ax0 = axes[0]
         if len(t_ocm) > 0:
             m_ocm = (t_ocm >= t0) & (t_ocm <= t1)
-            t_w = t_ocm[m_ocm]; v_w = vel_flag[m_ocm]; p_w = pos_flag[m_ocm]
+            t_w = t_ocm[m_ocm]
+            v_w = vel_flag[m_ocm]
+            p_w = pos_flag[m_ocm]
             for i in range(len(t_w) - 1):
                 if v_w[i] and not p_w[i]:
                     ax0.axvspan(t_w[i], t_w[i + 1], color="tab:orange", alpha=0.18, zorder=0)
@@ -455,16 +533,21 @@ def plot_pl_closeup(
         if lpos is not None:
             t_lp = t_rel(lpos, base_timestamp)
             m = (t_lp >= t0) & (t_lp <= t1)
-            ax0.plot(t_lp[m], -arr(lpos, "z")[m], lw=0.9, color="tab:green",
-                         alpha=0.7, label="EKF −z")
+            ax0.plot(
+                t_lp[m], -arr(lpos, "z")[m], lw=0.9, color="tab:green", alpha=0.7, label="EKF −z"
+            )
         if ld is not None:
             t_ld = t_rel(ld, base_timestamp)
             m = (t_ld >= t0) & (t_ld <= t1)
             for span_s, span_e in bool_spans(t_ld[m], arr(ld, "landed", dtype=int)[m]):
                 ax0.axvspan(span_s + t0, span_e + t0, color="gray", alpha=0.2, label="landed")
         phase_handles = [
-            mpatches.Patch(facecolor="tab:orange", alpha=0.45, label="offboard velocity ctrl (ocm.velocity=1)"),
-            mpatches.Patch(facecolor="tab:green", alpha=0.5, label="offboard position ctrl (ocm.position=1)"),
+            mpatches.Patch(
+                facecolor="tab:orange", alpha=0.45, label="offboard velocity ctrl (ocm.velocity=1)"
+            ),
+            mpatches.Patch(
+                facecolor="tab:green", alpha=0.5, label="offboard position ctrl (ocm.position=1)"
+            ),
         ]
         setup_axis(ax0, "AGL + offboard\\_control\\_mode phase", "m")
 
@@ -476,8 +559,13 @@ def plot_pl_closeup(
                 key = f"test_ratio[{i}]"
                 if key in aid.data:
                     y = arr(aid, key)[m]
-                    axes[1].plot(t_aid[m], np.where(np.isfinite(y), y, np.nan),
-                                 lw=1.0, color=color, label=f"OF test_ratio[{i}]")
+                    axes[1].plot(
+                        t_aid[m],
+                        np.where(np.isfinite(y), y, np.nan),
+                        lw=1.0,
+                        color=color,
+                        label=f"OF test_ratio[{i}]",
+                    )
             axes[1].axhline(1.0, color="black", lw=1.0, ls="--", label="gate")
             axes[1].set_yscale("symlog", linthresh=0.05)
         setup_axis(axes[1], "OF innovation test ratio (>1 = EKF rejected)", "ratio")
@@ -494,20 +582,31 @@ def plot_pl_closeup(
         if lpos is not None:
             t_lp = t_rel(lpos, base_timestamp)
             m = (t_lp >= t0) & (t_lp <= t1)
-            axes[3].plot(t_lp[m], arr(lpos, "vz")[m], lw=1.0, color="tab:olive",
-                         label="EKF vz (+down)")
+            axes[3].plot(
+                t_lp[m], arr(lpos, "vz")[m], lw=1.0, color="tab:olive", label="EKF vz (+down)"
+            )
             axes[3].axhline(0, color="gray", lw=0.6, ls=":")
         setup_axis(axes[3], "Vertical velocity (+down)", "m/s")
         axes[3].set_xlabel("time [s]")
 
         # shade the PL window itself
         for ax in axes:
-            ax.axvspan(win.t_start, win.t_end, color="tab:purple", alpha=0.10,
-                       label=win.label if ax is axes[0] else "")
+            ax.axvspan(
+                win.t_start,
+                win.t_end,
+                color="tab:purple",
+                alpha=0.10,
+                label=win.label if ax is axes[0] else "",
+            )
 
         h0, l0 = ax0.get_legend_handles_labels()
-        ax0.legend(handles=phase_handles + h0, labels=[p.get_label() for p in phase_handles] + l0,
-                   loc="best", fontsize=7, ncols=2)
+        ax0.legend(
+            handles=phase_handles + h0,
+            labels=[p.get_label() for p in phase_handles] + l0,
+            loc="best",
+            fontsize=7,
+            ncols=2,
+        )
         for ax in axes[1:]:
             ax.legend(loc="best", fontsize=7, ncols=2)
 
@@ -521,6 +620,7 @@ def plot_pl_closeup(
 # ---------------------------------------------------------------------------
 # Plot: VOXL abort sequence — velocity→position control transition, AGL at acquisition
 # ---------------------------------------------------------------------------
+
 
 def _voxl_offboard_phases(
     ulog: ULog, base_timestamp: int
@@ -544,15 +644,25 @@ def _trajectory_sp(
         empty = np.array([])
         return empty, empty, empty, empty, empty, empty
     t = t_rel(tsp, base_timestamp)
+
     def _f(k):
         return arr(tsp, k) if k in tsp.data else np.full(len(t), np.nan)
-    return t, _f("position[0]"), _f("position[1]"), _f("position[2]"), _f("velocity[2]"), _f("velocity[0]")
+
+    return (
+        t,
+        _f("position[0]"),
+        _f("position[1]"),
+        _f("position[2]"),
+        _f("velocity[2]"),
+        _f("velocity[0]"),
+    )
 
 
 def _detect_voxl_abort(t_sp: np.ndarray, pz: np.ndarray, threshold_m: float = 2.0) -> float | None:
     """Return time of first large upward jump in commanded NED z (abort)."""
     valid = np.isfinite(pz)
-    t_v = t_sp[valid]; pz_v = pz[valid]
+    t_v = t_sp[valid]
+    pz_v = pz[valid]
     if len(pz_v) < 2:
         return None
     dz = np.diff(pz_v)  # NED: negative dz = commanded climb
@@ -571,7 +681,7 @@ def plot_voxl_abort_analysis(
     range_result = get_range(ulog, base_timestamp)
     lpos = get_ds(ulog, "vehicle_local_position")
     t_ocm, pos_flag, vel_flag = _voxl_offboard_phases(ulog, base_timestamp)
-    t_sp, spx, spy, spz, sp_vz, sp_vx = _trajectory_sp(ulog, base_timestamp)
+    t_sp, _spx, _spy, spz, sp_vz, _sp_vx = _trajectory_sp(ulog, base_timestamp)
 
     # Clip to the largest OFFBOARD PL window + pad
     offboard_wins = [w for w in pl_windows if w.nav_state == 14]
@@ -597,7 +707,9 @@ def plot_voxl_abort_analysis(
     # shade velocity-only phase (no tag lock) and position phase (tag lock)
     if len(t_ocm) > 0:
         m_ocm = (t_ocm >= t0) & (t_ocm <= t1)
-        t_w = t_ocm[m_ocm]; v_w = vel_flag[m_ocm]; p_w = pos_flag[m_ocm]
+        t_w = t_ocm[m_ocm]
+        v_w = vel_flag[m_ocm]
+        p_w = pos_flag[m_ocm]
         for i in range(len(t_w) - 1):
             if v_w[i] and not p_w[i]:  # velocity-only = no tag
                 ax.axvspan(t_w[i], t_w[i + 1], color="tab:orange", alpha=0.18, zorder=0)
@@ -613,13 +725,23 @@ def plot_voxl_abort_analysis(
     if lpos is not None:
         t_lp = t_rel(lpos, base_timestamp)
         m = (t_lp >= t0) & (t_lp <= t1)
-        ax.plot(t_lp[m], arr(lpos, "z")[m], lw=1.1, color="tab:green", label="vehicle NED z (actual)")
+        ax.plot(
+            t_lp[m], arr(lpos, "z")[m], lw=1.1, color="tab:green", label="vehicle NED z (actual)"
+        )
 
     if len(t_sp) > 0:
         m = (t_sp >= t0) & (t_sp <= t1)
         z_cmd = np.where(np.isfinite(spz), spz, np.nan)
-        ax.plot(t_sp[m], z_cmd[m], lw=1.5, color="tab:red", ls="--",
-                marker="o", markersize=3, label="traj_sp NED z (VOXL cmd)")
+        ax.plot(
+            t_sp[m],
+            z_cmd[m],
+            lw=1.5,
+            color="tab:red",
+            ls="--",
+            marker="o",
+            markersize=3,
+            label="traj_sp NED z (VOXL cmd)",
+        )
 
     ax.invert_yaxis()  # NED: lower z = higher altitude → intuitive
     if abort_t is not None:
@@ -630,13 +752,33 @@ def plot_voxl_abort_analysis(
     ax = axes[2]
     if len(t_ocm) > 0:
         m = (t_ocm >= t0) & (t_ocm <= t1)
-        ax.step(t_ocm[m], pos_flag[m], where="post", lw=1.5, color="tab:green",
-                label="offboard_ctrl_mode.position (best tag-lock proxy)")
-        ax.step(t_ocm[m], vel_flag[m] * 0.6, where="post", lw=1.2, color="tab:orange",
-                ls="--", label="offboard\\_ctrl\\_mode.velocity ×0.6 (velocity ctrl phase)")
+        ax.step(
+            t_ocm[m],
+            pos_flag[m],
+            where="post",
+            lw=1.5,
+            color="tab:green",
+            label="offboard_ctrl_mode.position (best tag-lock proxy)",
+        )
+        ax.step(
+            t_ocm[m],
+            vel_flag[m] * 0.6,
+            where="post",
+            lw=1.2,
+            color="tab:orange",
+            ls="--",
+            label="offboard\\_ctrl\\_mode.velocity ×0.6 (velocity ctrl phase)",
+        )
         ax.set_ylim(-0.1, 1.2)
-    ax.text(0.01, 0.92, "NOTE: landing_target_pose topic ABSENT — no direct AprilTag bit in log",
-            transform=ax.transAxes, fontsize=6, color="tab:red", style="italic")
+    ax.text(
+        0.01,
+        0.92,
+        "NOTE: landing_target_pose topic ABSENT — no direct AprilTag bit in log",
+        transform=ax.transAxes,
+        fontsize=6,
+        color="tab:red",
+        style="italic",
+    )
     if abort_t is not None:
         ax.axvline(abort_t, color="tab:red", lw=1.2, ls="--", alpha=0.6)
     setup_axis(ax, "offboard_control_mode booleans (position=True ≡ VOXL tag lock)", "bool")
@@ -646,13 +788,27 @@ def plot_voxl_abort_analysis(
     if lpos is not None:
         t_lp = t_rel(lpos, base_timestamp)
         m = (t_lp >= t0) & (t_lp <= t1)
-        ax.plot(t_lp[m], arr(lpos, "vz")[m], lw=1.1, color="tab:olive", label="vehicle vz actual (NED +down)")
+        ax.plot(
+            t_lp[m],
+            arr(lpos, "vz")[m],
+            lw=1.1,
+            color="tab:olive",
+            label="vehicle vz actual (NED +down)",
+        )
 
     if len(t_sp) > 0:
         m = (t_sp >= t0) & (t_sp <= t1)
         vz_cmd = np.where(np.isfinite(sp_vz), sp_vz, np.nan)
-        ax.plot(t_sp[m], vz_cmd[m], lw=1.4, color="tab:purple", ls="--", marker="s",
-                markersize=3, label="traj_sp vz (VOXL cmd, valid in vel phase)")
+        ax.plot(
+            t_sp[m],
+            vz_cmd[m],
+            lw=1.4,
+            color="tab:purple",
+            ls="--",
+            marker="s",
+            markersize=3,
+            label="traj_sp vz (VOXL cmd, valid in vel phase)",
+        )
 
     ax.axhline(0, color="gray", lw=0.6, ls=":")
     if abort_t is not None:
@@ -662,13 +818,23 @@ def plot_voxl_abort_analysis(
 
     _shade_windows(axes, pl_windows)
     import matplotlib.patches as mpatches
+
     phase_handles = [
-        mpatches.Patch(facecolor="tab:orange", alpha=0.45, label="velocity ctrl (ocm.velocity=1, ocm.position=0)"),
+        mpatches.Patch(
+            facecolor="tab:orange",
+            alpha=0.45,
+            label="velocity ctrl (ocm.velocity=1, ocm.position=0)",
+        ),
         mpatches.Patch(facecolor="tab:green", alpha=0.5, label="position ctrl (ocm.position=1)"),
     ]
     h0, l0 = axes[0].get_legend_handles_labels()
-    axes[0].legend(handles=phase_handles + h0, labels=[p.get_label() for p in phase_handles] + l0,
-                   loc="best", fontsize=7, ncols=2)
+    axes[0].legend(
+        handles=phase_handles + h0,
+        labels=[p.get_label() for p in phase_handles] + l0,
+        loc="best",
+        fontsize=7,
+        ncols=2,
+    )
     for ax in axes[1:]:
         ax.legend(loc="best", fontsize=7, ncols=2)
     axes[-1].set_xlim(t0, t1)
@@ -680,6 +846,7 @@ def plot_voxl_abort_analysis(
 # Plot: VOXL XY approach — lateral guidance and horizontal error
 # ---------------------------------------------------------------------------
 
+
 def plot_voxl_xy_approach(
     ulog: ULog,
     base_timestamp: int,
@@ -690,10 +857,14 @@ def plot_voxl_xy_approach(
     """4-panel showing VOXL XY guidance: commanded vs actual horizontal motion."""
     lpos = get_ds(ulog, "vehicle_local_position")
     range_result = get_range(ulog, base_timestamp)
-    t_ocm, pos_flag, vel_flag = _voxl_offboard_phases(ulog, base_timestamp)
-    t_sp, spx, spy, spz, sp_vz, sp_vx = _trajectory_sp(ulog, base_timestamp)
+    t_ocm, pos_flag, _vel_flag = _voxl_offboard_phases(ulog, base_timestamp)
+    t_sp, spx, spy, spz, _sp_vz, sp_vx = _trajectory_sp(ulog, base_timestamp)
     tsp = get_ds(ulog, "trajectory_setpoint")
-    sp_vy = arr(tsp, "velocity[1]") if tsp is not None and "velocity[1]" in tsp.data else np.full(len(t_sp), np.nan)
+    sp_vy = (
+        arr(tsp, "velocity[1]")
+        if tsp is not None and "velocity[1]" in tsp.data
+        else np.full(len(t_sp), np.nan)
+    )
 
     offboard_wins = [w for w in pl_windows if w.nav_state == 14]
     if offboard_wins:
@@ -711,10 +882,20 @@ def plot_voxl_xy_approach(
     ax = axes[0]
     if len(t_sp) > 0:
         m = (t_sp >= t0) & (t_sp <= t1)
-        ax.plot(t_sp[m], np.where(np.isfinite(sp_vx), sp_vx, np.nan)[m],
-                lw=1.1, color="tab:blue", label="cmd vx (body-aligned)")
-        ax.plot(t_sp[m], np.where(np.isfinite(sp_vy), sp_vy, np.nan)[m],
-                lw=1.1, color="tab:orange", label="cmd vy")
+        ax.plot(
+            t_sp[m],
+            np.where(np.isfinite(sp_vx), sp_vx, np.nan)[m],
+            lw=1.1,
+            color="tab:blue",
+            label="cmd vx (body-aligned)",
+        )
+        ax.plot(
+            t_sp[m],
+            np.where(np.isfinite(sp_vy), sp_vy, np.nan)[m],
+            lw=1.1,
+            color="tab:orange",
+            label="cmd vy",
+        )
     ax.axhline(0, color="gray", lw=0.6, ls=":")
     setup_axis(ax, "VOXL commanded lateral velocity (NaN when tag seen)", "m/s")
 
@@ -742,10 +923,21 @@ def plot_voxl_xy_approach(
             err_x = spx[m_sp] - vx_interp
             err_y = spy[m_sp] - vy_interp
             lateral_err = np.hypot(err_x, err_y)
-            ax.plot(t_sp[m_sp], lateral_err, lw=1.4, color="tab:red", marker="o",
-                    markersize=4, label="|cmd_pos − actual| (position phase only)")
-            ax.plot(t_sp[m_sp], err_x, lw=1.0, color="tab:blue", ls="--", alpha=0.7, label="error x")
-            ax.plot(t_sp[m_sp], err_y, lw=1.0, color="tab:orange", ls="--", alpha=0.7, label="error y")
+            ax.plot(
+                t_sp[m_sp],
+                lateral_err,
+                lw=1.4,
+                color="tab:red",
+                marker="o",
+                markersize=4,
+                label="|cmd_pos − actual| (position phase only)",
+            )
+            ax.plot(
+                t_sp[m_sp], err_x, lw=1.0, color="tab:blue", ls="--", alpha=0.7, label="error x"
+            )
+            ax.plot(
+                t_sp[m_sp], err_y, lw=1.0, color="tab:orange", ls="--", alpha=0.7, label="error y"
+            )
         ax.axhline(0, color="gray", lw=0.6, ls=":")
     setup_axis(ax, "Lateral error to commanded position (only valid when tag locked)", "m")
 
@@ -767,8 +959,11 @@ def plot_voxl_xy_approach(
                     agl_at_acq = float(np.interp(st, t_r, r_m))
                     ax.annotate(
                         f"tag lock\n{agl_at_acq:.2f}m AGL",
-                        (st, agl_at_acq), fontsize=7, color="tab:green",
-                        xytext=(6, 6), textcoords="offset points",
+                        (st, agl_at_acq),
+                        fontsize=7,
+                        color="tab:green",
+                        xytext=(6, 6),
+                        textcoords="offset points",
                     )
 
     if abort_t is not None:
@@ -777,8 +972,11 @@ def plot_voxl_xy_approach(
             agl_at_abort = float(np.interp(abort_t, t_r, r_m))
             ax.annotate(
                 f"abort\n{agl_at_abort:.2f}m AGL",
-                (abort_t, agl_at_abort), fontsize=7, color="tab:red",
-                xytext=(6, 6), textcoords="offset points",
+                (abort_t, agl_at_abort),
+                fontsize=7,
+                color="tab:red",
+                xytext=(6, 6),
+                textcoords="offset points",
             )
     setup_axis(ax, "AGL — tag acquisition and abort moments", "m")
     ax.set_xlabel("flight-log relative time [s]")
@@ -795,6 +993,7 @@ def plot_voxl_xy_approach(
 # Summary
 # ---------------------------------------------------------------------------
 
+
 def pl_metric_summary(
     ulog: ULog,
     base_timestamp: int,
@@ -802,7 +1001,7 @@ def pl_metric_summary(
 ) -> dict[str, str]:
     out: dict[str, str] = {}
 
-    is_replay, replay_note = check_ekf2_replay(ulog)
+    _is_replay, replay_note = check_ekf2_replay(ulog)
     out["ekf2_replay"] = replay_note
 
     # landing_target_pose presence
@@ -826,7 +1025,9 @@ def pl_metric_summary(
             m = (t_aid >= win.t_start) & (t_aid <= win.t_end)
             if m.sum() == 0:
                 continue
-            r0 = tr0[m]; r1 = tr1[m]; ft = fuse_t[m]
+            r0 = tr0[m]
+            r1 = tr1[m]
+            ft = fuse_t[m]
             stalls = int(np.sum(np.diff(ft) == 0))
             out[f"{win.label}_of_test_ratio_max"] = (
                 f"axis0={np.nanmax(r0):.3f}  axis1={np.nanmax(r1):.3f}"
@@ -852,7 +1053,7 @@ def pl_metric_summary(
 
     # VOXL OFFBOARD phase metrics
     t_ocm, pos_flag, vel_flag = _voxl_offboard_phases(ulog, base_timestamp)
-    t_sp, spx, spy, spz, sp_vz, _ = _trajectory_sp(ulog, base_timestamp)
+    t_sp, spx, _spy, spz, _sp_vz, _ = _trajectory_sp(ulog, base_timestamp)
 
     if len(t_ocm) > 0 and len(t_sp) > 0:
         abort_t = _detect_voxl_abort(t_sp, spz)
@@ -867,7 +1068,9 @@ def pl_metric_summary(
             # AGL at acquisition
             if range_result is not None:
                 t_r, r_m = range_result
-                out["voxl_agl_at_tag_acquisition_m"] = f"{float(np.interp(tag_acq_t, t_r, r_m)):.3f}"
+                out["voxl_agl_at_tag_acquisition_m"] = (
+                    f"{float(np.interp(tag_acq_t, t_r, r_m)):.3f}"
+                )
             if abort_t is not None and range_result is not None:
                 out["voxl_agl_at_abort_m"] = f"{float(np.interp(abort_t, t_r, r_m)):.3f}"
 
@@ -875,7 +1078,9 @@ def pl_metric_summary(
             offboard_wins = [w for w in pl_windows if w.nav_state == 14]
             if offboard_wins:
                 w0 = offboard_wins[0]
-                m_vel = (t_ocm >= w0.t_start) & (t_ocm <= w0.t_end) & (vel_flag > 0) & (pos_flag == 0)
+                m_vel = (
+                    (t_ocm >= w0.t_start) & (t_ocm <= w0.t_end) & (vel_flag > 0) & (pos_flag == 0)
+                )
                 m_pos = (t_ocm >= w0.t_start) & (t_ocm <= w0.t_end) & (pos_flag > 0)
                 # approximate duration by time span of each phase
                 if m_vel.sum() > 1:
@@ -906,14 +1111,21 @@ def pl_metric_summary(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _shade_windows(axes, pl_windows: list[PLWindow], colors: tuple[str, ...] = ("tab:purple", "tab:cyan")) -> None:
+
+def _shade_windows(
+    axes, pl_windows: list[PLWindow], colors: tuple[str, ...] = ("tab:purple", "tab:cyan")
+) -> None:
     for i, win in enumerate(pl_windows):
         color = colors[i % len(colors)]
         for ax in axes:
             ax.axvspan(win.t_start, win.t_end, color=color, alpha=0.12, zorder=0)
         axes[0].annotate(
-            win.label, (win.t_start, axes[0].get_ylim()[1]),
-            fontsize=7, color=color, xytext=(2, -10), textcoords="offset points",
+            win.label,
+            (win.t_start, axes[0].get_ylim()[1]),
+            fontsize=7,
+            color=color,
+            xytext=(2, -10),
+            textcoords="offset points",
         )
 
 
@@ -924,13 +1136,13 @@ def _shade_windows(axes, pl_windows: list[PLWindow], colors: tuple[str, ...] = (
 _EKF_CS_FIELDS = [
     ("cs_baro_hgt", "Barometer height"),
     ("cs_opt_flow", "Optical flow velocity"),
-    ("cs_rng_hgt",  "Rangefinder height aid"),
-    ("cs_ev_pos",   "External vision position (VIO)"),
-    ("cs_ev_vel",   "External vision velocity (VIO)"),
-    ("cs_ev_yaw",   "External vision yaw (VIO)"),
-    ("cs_ev_hgt",   "External vision height (VIO)"),
-    ("cs_gps",      "GPS"),
-    ("cs_mag_hdg",  "Magnetometer heading"),
+    ("cs_rng_hgt", "Rangefinder height aid"),
+    ("cs_ev_pos", "External vision position (VIO)"),
+    ("cs_ev_vel", "External vision velocity (VIO)"),
+    ("cs_ev_yaw", "External vision yaw (VIO)"),
+    ("cs_ev_hgt", "External vision height (VIO)"),
+    ("cs_gps", "GPS"),
+    ("cs_mag_hdg", "Magnetometer heading"),
 ]
 
 
@@ -983,9 +1195,7 @@ def build_pl_latex(
         t_s = le(summary.get(f"{win.label}_t_start", "?"))
         t_e = le(summary.get(f"{win.label}_t_end", "?"))
         nav = le(summary.get(f"{win.label}_nav_state", "?"))
-        exec_lines.append(
-            rf"\textbf{{{wl}}} ({nav}, t\,=\,{t_s}--{t_e}):"
-        )
+        exec_lines.append(rf"\textbf{{{wl}}} ({nav}, t\,=\,{t_s}--{t_e}):")
 
     if has_voxl and is_offboard:
         acq_t = le(summary.get("voxl_tag_acquisition_time_s", "?"))
@@ -1095,12 +1305,15 @@ delaying (or preventing) tag acquisition until essentially touching the pad.
     mode_rows = ""
     if "mode_timeline" in rel:
         from pyulog import ULog as _ULog  # local import to avoid circular at module level
+
         _ulog_tmp = _ULog(str(log_path))
         _base_tmp = _ulog_tmp.start_timestamp
         _spans = _mode_spans(_ulog_tmp, _base_tmp)
         for t0, t1, state, name in _spans:
             dur = t1 - t0
-            mode_rows += f"  {le(f'{t0:.2f}')} & {le(f'{t1:.2f}')} & {le(name)} & {le(f'{dur:.2f}')} \\\\\n"
+            mode_rows += (
+                f"  {le(f'{t0:.2f}')} & {le(f'{t1:.2f}')} & {le(name)} & {le(f'{dur:.2f}')} \\\\\n"
+            )
 
     mode_table = ""
     if mode_rows:
@@ -1236,9 +1449,12 @@ blue = POSCTL, red = AUTO\_LAND.}}
 
 \section{{Optical Flow Health}}
 Panel 1: sensor quality (0--255; floor at 50 shown as red dashed).
-Panel 2: EKF innovation test ratios for both OF axes (gate = 1.0).
-Panel 3: fusion stall indicator (red = EKF stopped fusing OF).
-Panel 4: EKF-fused body velocity from optical flow.
+Panel 2: PX4 time-tag latency
+(\texttt{{vehicle\_optical\_flow.timestamp - timestamp\_sample}}).
+Panel 3: raw \texttt{{vehicle\_optical\_flow.pixel\_flow}} x/y axes.
+Panel 4: EKF innovation test ratios for both OF axes (gate = 1.0).
+Panel 5: fusion stall indicator (red = EKF stopped fusing OF).
+Panel 6: EKF-fused body velocity from optical flow.
 
 \begin{{figure}}[H]
 \centering
@@ -1382,6 +1598,7 @@ before the second trigger was pressed).
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def generate_pl_report(log_path: Path, output_dir: Path) -> PLArtifacts:
     output_dir.mkdir(parents=True, exist_ok=True)
     fig_dir = output_dir / "figures"
@@ -1398,7 +1615,9 @@ def generate_pl_report(log_path: Path, output_dir: Path) -> PLArtifacts:
 
     pl_windows = detect_pl_windows(ulog, base_timestamp)
     if not pl_windows:
-        print("[pl-analysis] WARNING: no landing-mode windows detected (OFFBOARD/AUTO_LAND/PRECLAND)")
+        print(
+            "[pl-analysis] WARNING: no landing-mode windows detected (OFFBOARD/AUTO_LAND/PRECLAND)"
+        )
     else:
         for w in pl_windows:
             print(f"[pl-analysis] detected {w.label}  t={w.t_start:.1f}–{w.t_end:.1f}s")

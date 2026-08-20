@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from .analysis import generate_review
 from .config import config_from_log, load_config
 from .precision_landing import generate_pl_report
 
 
+def print_artifact_summary(artifacts) -> None:
+    print(f"report_dir: {artifacts.output_dir}")
+    print(f"pdf: {artifacts.pdf_path}")
+    print(f"summary: {artifacts.summary_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ekf2-review", description="Generate PX4 EKF2 replay review PDFs")
+    parser = argparse.ArgumentParser(
+        prog="ekf2-review", description="Generate PX4 EKF2 replay review PDFs"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate", help="generate plots, summary, and PDF")
@@ -46,10 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable flight-mode background shading on time-series plots",
     )
 
-    pl = sub.add_parser("pl-analysis", help="precision-landing failure analysis (optical flow, land detection, mode timeline)")
+    pl = sub.add_parser(
+        "pl-analysis",
+        help="precision-landing failure analysis (optical flow, land detection, mode timeline)",
+    )
     pl.add_argument("--log", required=True, type=Path, help="path to .ulg flight log")
-    pl.add_argument("--output-dir", type=Path, default=None,
-                    help="output directory (default: <log_stem>_pl_analysis/ next to log)")
+    pl.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="output directory (default: <log_stem>_pl_analysis/ next to log)",
+    )
 
     return parser
 
@@ -74,12 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.no_mode_shading:
             config = dataclasses.replace(config, shade_flight_modes=False)
         artifacts = generate_review(config)
-        print(f"output_dir: {artifacts.output_dir}")
-        print(f"summary: {artifacts.summary_path}")
-        print(f"tex: {artifacts.tex_path}")
-        print(f"pdf: {artifacts.pdf_path}")
-        for name, path in artifacts.figures.items():
-            print(f"figure:{name}: {path}")
+        print_artifact_summary(artifacts)
         return 0
 
     if args.command == "pl-analysis":
@@ -89,14 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         output_dir = args.output_dir or log_path.parent / f"{log_path.stem}_pl_analysis"
         artifacts = generate_pl_report(log_path, output_dir)
-        print(f"output_dir: {artifacts.output_dir}")
-        print(f"summary: {artifacts.summary_path}")
-        if artifacts.tex_path:
-            print(f"tex: {artifacts.tex_path}")
-        if artifacts.pdf_path:
-            print(f"pdf: {artifacts.pdf_path}")
-        for name, path in artifacts.figures.items():
-            print(f"figure:{name}: {path}")
+        print_artifact_summary(artifacts)
         return 0
 
     parser.print_help(sys.stderr)
