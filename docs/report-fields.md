@@ -19,7 +19,7 @@ parameters are omitted from the sensor health table.
 
 The larger sensor subsections use sensor-specific topics when available:
 
-- IMU: raw accelerometer and gyroscope measurements from `sensor_combined`
+- IMU: calibrated body-frame accelerometer and gyroscope measurements from `sensor_combined`
   (`accelerometer_m_s2[]`, `gyro_rad[]`) when logged, falling back to
   `vehicle_imu.delta_velocity[] / delta_velocity_dt` and
   `vehicle_imu.delta_angle[] / delta_angle_dt`, plus `vehicle_imu_status`,
@@ -54,6 +54,22 @@ The IMU vibration panel follows Flight Review-style accel vibration bands:
 values below 5 are green, below 10 are yellow, and values above 10 are red.
 When multiple `vehicle_imu_status` instances are logged, each accel vibration
 instance is plotted separately.
+The separate IMU Raw and Bias-Adjusted Measurements subsection preserves the
+processing-stage distinction: `sensor_accel`/`sensor_gyro` are sensor/board FRD
+measurements, `sensor_combined` is calibrated body FRD, and
+`vehicle_acceleration`/`vehicle_angular_velocity` are body-frame outputs with
+the matching `estimator_sensor_bias` in-run bias removed and filtering applied.
+It plots X/Y/Z comparisons, bias estimates with one-sigma uncertainty and
+limits, and the corresponding bias `valid` and `stable` fields. Sensor-level
+streams may appear sparse because PX4 logging rates are independent of hardware
+sampling rates.
+
+The Pitch and Forward-Lurch Diagnostics subsection plots the pitch attitude and
+pitch-rate response chains, commanded and unallocated pitch torque, front/rear
+motor command means and their differential, and
+`estimator_sensor_bias.accel_bias[0..2]`. Front and rear motor groups are derived
+from the sign of each logged `CA_ROTOR*_PX` geometry parameter; they are not
+hard-coded to one motor numbering scheme.
 The attitude overview uses `vehicle_attitude`, `vehicle_attitude_setpoint`,
 `vehicle_angular_velocity`, and `vehicle_local_position` when available.
 
@@ -147,6 +163,15 @@ Important flags:
 
 All logged `cs_*` fields are plotted in the Control Statuses section rather than
 inside individual sensor figures.
+
+The Inertial Dead Reckoning Diagnostics section gathers the signals needed to
+distinguish inertial propagation from active aiding. It plots local NED
+velocity and acceleration, dead-reckoning and vehicle-state flags, horizontal
+aiding and height control bits, per-sample optical-flow `fusion_enabled`,
+`fused`, and `innovation_rejected` status, and horizontal velocity/position reset counters.
+When logged, dotted event markers identify `reset_vel_to_flow` and
+`reset_pos_to_last_known` events. An active `cs_opt_flow` bit is therefore shown
+separately from proof that an optical-flow sample was actually fused.
 
 ## Innovation Test Ratios
 

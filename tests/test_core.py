@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -20,6 +21,7 @@ from ekf2_playback_review.analysis import (
     ev_test_ratio_panel_specs,
     exceedance_start_times,
     format_spans,
+    front_rear_motor_indices,
     get_actuator_saturation_series,
     get_esc_rpm_series,
     get_motor_output_set,
@@ -36,6 +38,10 @@ from ekf2_playback_review.analysis import (
     nav_state_spans,
     parameter_bitmask_rows,
     parameter_enum_rows,
+    plot_accel_bias_adjustment,
+    plot_forward_lurch_diagnostics,
+    plot_gyro_bias_adjustment,
+    plot_inertial_dead_reckoning,
     rangefinder_test_ratio_series,
     reset_event_rows,
     sensor_latency_series,
@@ -813,9 +819,7 @@ class TerrainEstimateTests(unittest.TestCase):
         np.testing.assert_allclose(
             by_label["HAGL: vehicle_local_position.dist_bottom"], [4.0, 4.2, 4.4]
         )
-        np.testing.assert_allclose(
-            by_label["terrain local NED: z + dist_bottom"], [0.0, 0.7, 1.4]
-        )
+        np.testing.assert_allclose(by_label["terrain local NED: z + dist_bottom"], [0.0, 0.7, 1.4])
         np.testing.assert_allclose(
             by_label["terrain global NED rel start: -delta terrain_alt"],
             [0.0, -0.5, -1.0],
@@ -1082,10 +1086,13 @@ class EstimatorTableTests(unittest.TestCase):
 
         rows = reset_event_rows(_make_ulog([local_position]), BASE_TS)
 
-        self.assertEqual([row.source for row in rows], [
-            "vehicle_local_position.z_reset_counter",
-            "vehicle_local_position.dist_bottom_reset_counter",
-        ])
+        self.assertEqual(
+            [row.source for row in rows],
+            [
+                "vehicle_local_position.z_reset_counter",
+                "vehicle_local_position.dist_bottom_reset_counter",
+            ],
+        )
         self.assertAlmostEqual(rows[0].time_s, 2.0)
         self.assertIn("-0.250 m z", rows[0].delta)
         self.assertAlmostEqual(rows[1].time_s, 3.0)
@@ -1119,6 +1126,193 @@ class EstimatorTableTests(unittest.TestCase):
         row = next(row for row in rows if row.field == "check_fail_max_vert_spd_err")
         self.assertAlmostEqual(row.duration_s, 2.0)
         self.assertEqual(row.meaning, "maximum allowed vertical velocity discrepancy fail")
+
+
+class InertialDeadReckoningPlotTests(unittest.TestCase):
+    def test_plot_combines_state_aiding_flow_status_and_resets(self):
+        t_us = (BASE_TS + np.arange(4) * int(1e6)).astype(np.int64)
+        local_position = _make_ds(
+            "vehicle_local_position",
+            t_us,
+            vx=np.array([0.0, -0.1, 0.0, -0.1]),
+            vy=np.zeros(4),
+            vz=np.zeros(4),
+            ax=np.array([0.0, -0.1, 0.0, -0.1]),
+            ay=np.zeros(4),
+            az=np.zeros(4),
+            vxy_reset_counter=np.array([1, 1, 2, 2]),
+            xy_reset_counter=np.array([3, 3, 4, 4]),
+        )
+        flags = _make_ds(
+            "estimator_status_flags",
+            t_us,
+            cs_inertial_dead_reckoning=np.array([0, 1, 0, 1]),
+            cs_opt_flow=np.ones(4, dtype=int),
+            cs_ev_pos=np.zeros(4, dtype=int),
+            cs_rng_hgt=np.ones(4, dtype=int),
+        )
+        aid_flow = _make_ds(
+            "estimator_aid_src_optical_flow",
+            t_us,
+            fusion_enabled=np.zeros(4, dtype=int),
+            fused=np.zeros(4, dtype=int),
+            innovation_rejected=np.zeros(4, dtype=int),
+        )
+        events = _make_ds(
+            "estimator_event_flags",
+            t_us,
+            reset_vel_to_flow=np.array([0, 1, 0, 1]),
+            reset_pos_to_last_known=np.array([0, 1, 0, 1]),
+        )
+        ulog = _make_ulog([local_position, flags, aid_flow, events])
+
+        with TemporaryDirectory() as tmp_dir:
+            output = plot_inertial_dead_reckoning(ulog, BASE_TS, Path(tmp_dir), shade_modes=False)
+            self.assertTrue(output.exists())
+            self.assertEqual(output.name, "inertial_dead_reckoning.png")
+            self.assertTrue(output.with_suffix(".pdf").exists())
+
+
+class ImuBiasAdjustmentPlotTests(unittest.TestCase):
+    def test_plots_sensor_combined_adjusted_and_bias_status(self):
+        t_us = (BASE_TS + np.arange(4) * int(1e6)).astype(np.int64)
+        sensor_accel = _make_ds(
+            "sensor_accel",
+            t_us,
+            x=np.array([0.1, 0.2, 0.3, 0.4]),
+            y=np.array([0.0, 0.1, 0.0, 0.1]),
+            z=np.array([-9.8, -9.7, -9.8, -9.7]),
+        )
+        sensor_gyro = _make_ds(
+            "sensor_gyro",
+            t_us,
+            x=np.array([0.01, 0.02, 0.01, 0.02]),
+            y=np.zeros(4),
+            z=np.zeros(4),
+        )
+        sensor_combined = _make_ds(
+            "sensor_combined",
+            t_us,
+            **{
+                "accelerometer_m_s2[0]": np.array([0.1, 0.2, 0.3, 0.4]),
+                "accelerometer_m_s2[1]": np.zeros(4),
+                "accelerometer_m_s2[2]": np.full(4, -9.8),
+                "gyro_rad[0]": np.array([0.01, 0.02, 0.01, 0.02]),
+                "gyro_rad[1]": np.zeros(4),
+                "gyro_rad[2]": np.zeros(4),
+            },
+        )
+        vehicle_acceleration = _make_ds(
+            "vehicle_acceleration",
+            t_us,
+            **{f"xyz[{index}]": np.zeros(4) for index in range(3)},
+        )
+        vehicle_angular_velocity = _make_ds(
+            "vehicle_angular_velocity",
+            t_us,
+            **{f"xyz[{index}]": np.zeros(4) for index in range(3)},
+        )
+        bias_fields = {
+            "accel_bias_limit": np.full(4, 0.4),
+            "accel_bias_valid": np.ones(4, dtype=int),
+            "accel_bias_stable": np.zeros(4, dtype=int),
+            "gyro_bias_limit": np.full(4, 0.1),
+            "gyro_bias_valid": np.ones(4, dtype=int),
+            "gyro_bias_stable": np.ones(4, dtype=int),
+        }
+        for prefix in ("accel", "gyro"):
+            for index in range(3):
+                bias_fields[f"{prefix}_bias[{index}]"] = np.full(4, 0.01 * (index + 1))
+                bias_fields[f"{prefix}_bias_variance[{index}]"] = np.full(4, 0.0001)
+        estimator_sensor_bias = _make_ds("estimator_sensor_bias", t_us, **bias_fields)
+        ulog = _make_ulog(
+            [
+                sensor_accel,
+                sensor_gyro,
+                sensor_combined,
+                vehicle_acceleration,
+                vehicle_angular_velocity,
+                estimator_sensor_bias,
+            ]
+        )
+
+        with TemporaryDirectory() as tmp_dir:
+            fig_dir = Path(tmp_dir)
+            accel_output = plot_accel_bias_adjustment(ulog, BASE_TS, fig_dir, shade_modes=False)
+            gyro_output = plot_gyro_bias_adjustment(ulog, BASE_TS, fig_dir, shade_modes=False)
+            self.assertEqual(accel_output.name, "accel_bias_adjustment.png")
+            self.assertTrue(accel_output.with_suffix(".pdf").exists())
+            self.assertEqual(gyro_output.name, "gyro_bias_adjustment.png")
+            self.assertTrue(gyro_output.with_suffix(".pdf").exists())
+
+
+class ForwardLurchDiagnosticPlotTests(unittest.TestCase):
+    def test_derives_motor_groups_from_geometry_and_plots_response_chain(self):
+        t_us = (BASE_TS + np.arange(4) * int(1e6)).astype(np.int64)
+        attitude = _make_ds(
+            "vehicle_attitude",
+            t_us,
+            **{
+                "q[0]": np.ones(4),
+                "q[1]": np.zeros(4),
+                "q[2]": np.zeros(4),
+                "q[3]": np.zeros(4),
+            },
+        )
+        attitude_sp = _make_ds(
+            "vehicle_attitude_setpoint",
+            t_us,
+            roll_body=np.zeros(4),
+            pitch_body=np.radians(np.array([0.0, 2.0, 4.0, 2.0])),
+            yaw_body=np.zeros(4),
+        )
+        angular_velocity = _make_ds(
+            "vehicle_angular_velocity",
+            t_us,
+            **{"xyz[1]": np.radians(np.array([0.0, 1.0, 2.0, 1.0]))},
+        )
+        rates_sp = _make_ds(
+            "vehicle_rates_setpoint",
+            t_us,
+            pitch=np.radians(np.array([0.0, 2.0, 3.0, 1.0])),
+        )
+        torque_sp = _make_ds(
+            "vehicle_torque_setpoint", t_us, **{"xyz[1]": np.array([0.0, 0.1, 0.2, 0.1])}
+        )
+        allocator = _make_ds(
+            "control_allocator_status", t_us, **{"unallocated_torque[1]": np.zeros(4)}
+        )
+        motors = _make_ds(
+            "actuator_motors",
+            t_us,
+            **{
+                "control[0]": np.array([0.2, 0.3, 0.4, 0.3]),
+                "control[1]": np.array([0.2, 0.2, 0.3, 0.2]),
+                "control[2]": np.array([0.2, 0.3, 0.4, 0.3]),
+                "control[3]": np.array([0.2, 0.2, 0.3, 0.2]),
+            },
+        )
+        bias = _make_ds(
+            "estimator_sensor_bias",
+            t_us,
+            **{f"accel_bias[{index}]": np.full(4, 0.01 * index) for index in range(3)},
+        )
+        ulog = _make_ulog(
+            [attitude, attitude_sp, angular_velocity, rates_sp, torque_sp, allocator, motors, bias]
+        )
+        ulog.initial_parameters = {
+            "CA_ROTOR_COUNT": 4,
+            "CA_ROTOR0_PX": 0.1,
+            "CA_ROTOR1_PX": -0.1,
+            "CA_ROTOR2_PX": 0.1,
+            "CA_ROTOR3_PX": -0.1,
+        }
+
+        self.assertEqual(front_rear_motor_indices(ulog, 4), ([0, 2], [1, 3]))
+        with TemporaryDirectory() as tmp_dir:
+            output = plot_forward_lurch_diagnostics(ulog, BASE_TS, Path(tmp_dir), shade_modes=False)
+            self.assertEqual(output.name, "forward_lurch_diagnostics.png")
+            self.assertTrue(output.with_suffix(".pdf").exists())
 
 
 if __name__ == "__main__":
